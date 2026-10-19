@@ -1,6 +1,12 @@
 const $ = (selector) => document.querySelector(selector);
-const state = { user: null, mode: 'login', references: [], history: [], busy: false, reading: false };
+const state = { user: null, mode: 'login', references: [], history: [], activeImageItem: null, busy: false, reading: false };
+if (['/studio', '/wallet'].includes(location.pathname)) {
+  document.body?.classList.add('studio-theme');
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', '#0b1020');
+}
 const ideas = {
+  fantasy: '一位旅人站在云海边的古老城堡前，巨龙从远处天空掠过，月光照亮披风与石阶，细腻奇幻插画，电影感构图。',
+  city: '雨夜的未来都市街道，霓虹灯映在潮湿地面上，一位穿黑色外套的年轻人回头望向镜头，紫蓝色光影，精致动漫插画。',
   product: '一瓶透明玻璃香水置于浅紫色石台上，晨光从侧面穿过，细腻的玻璃折射，极简产品摄影，干净留白。',
   space: '一座面朝海面的暖色拱门建筑，柔和的午后阳光，天然石材与细腻肌理，地中海风格，建筑摄影。',
   abstract: '漂浮的紫色玻璃球体与金属圆环，柔和光线，浅薰衣草色背景，抽象艺术，精致的材质细节。',
@@ -43,7 +49,7 @@ function authMode(mode) {
   $('#login-tab').setAttribute('aria-selected', String(!registering));
   $('#register-tab').setAttribute('aria-selected', String(registering));
   $('#auth-title').textContent = registering ? '为灵感，创建一个空间' : '欢迎回来';
-  $('#auth-kicker').textContent = registering ? 'START YOUR CREATIVE JOURNEY' : 'WELCOME BACK';
+  $('#auth-kicker').textContent = registering ? '开启你的创作旅程' : '欢迎回来';
   $('#auth-subtitle').textContent = registering ? '注册账号，开启你的图像创作。' : '登录后，继续你的创作。';
   $('#auth-submit').textContent = registering ? '创建账号，开始创作 ↗' : '登录工作台 ↗';
   $('#password').autocomplete = registering ? 'new-password' : 'current-password';
@@ -181,21 +187,58 @@ $('#paste-reference').addEventListener('click', async () => {
 });
 function asDataUrl(file) { return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = () => reject(new Error('图片读取失败，请重新添加')); reader.readAsDataURL(file); }); }
 $('#prompt').addEventListener('input', () => $('#prompt-count').textContent = `${$('#prompt').value.length} / 4000`);
+$('#prompt').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+    event.preventDefault();
+    if (!state.busy) $('#generation-form').requestSubmit();
+  }
+});
 document.querySelectorAll('[data-idea]').forEach((button) => button.addEventListener('click', () => { $('#prompt').value = ideas[button.dataset.idea]; $('#prompt').dispatchEvent(new Event('input')); $('#prompt').focus(); }));
 
 function showResult(item) {
   const src = imageSource(item.image_src); if (!src) return;
+  state.activeImageItem = item;
   $('#generation-empty').classList.add('is-hidden'); $('#generation-result').classList.remove('is-hidden');
   $('#result-image').src = src; $('#result-full').href = src; $('#download-result').href = src;
   $('#result-prompt').textContent = item.prompt;
   $('#share-result').href = '/?compose=1&image=' + encodeURIComponent(item.id);
   $('#result-meta').replaceChildren(...[item.mode === 'image-to-image' ? `图生图 · ${item.reference_count || 1} 张参考图` : '文生图', item.size, `${item.credits_cost ?? 1} 积分`].map((value) => { const el = document.createElement('span'); el.textContent = value; return el; }));
 }
+$('#zoom-result').addEventListener('click', () => {
+  const source = imageSource(state.activeImageItem?.image_src);
+  if (!source) return;
+  $('#zoom-image').src = source;
+  $('#image-zoom-dialog').showModal();
+});
+$('#close-image-zoom').addEventListener('click', () => $('#image-zoom-dialog').close());
+$('#image-zoom-dialog').addEventListener('click', (event) => { if (event.target === $('#image-zoom-dialog')) $('#image-zoom-dialog').close(); });
+$('#use-result-reference').addEventListener('click', async () => {
+  const item = state.activeImageItem;
+  if (!item || state.busy) return;
+  const source = imageSource(item.image_src);
+  if (!source) return;
+  const button = $('#use-result-reference'); button.disabled = true;
+  try {
+    const response = await fetch(source, { credentials: 'same-origin' });
+    if (!response.ok) throw new Error('暂时无法读取这张作品');
+    const blob = await response.blob();
+    const type = ['image/png', 'image/jpeg', 'image/webp'].includes(blob.type) ? blob.type : 'image/png';
+    const before = state.references.length;
+    await addReferences([new File([blob], `作品参考图.${type.split('/')[1]}`, { type })]);
+    if (state.references.length === before) return;
+    if (!$('#prompt').value.trim()) { $('#prompt').value = item.prompt || ''; $('#prompt').dispatchEvent(new Event('input')); }
+    $('#prompt').focus();
+    $('.composer').scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+  } catch (error) { toast(error.message || '无法将作品加入参考图', true); }
+  finally { button.disabled = false; }
+});
 function renderHistory() {
   $('#history-grid').replaceChildren(...state.history.filter((item) => imageSource(item.image_src)).map((item) => {
     const card = document.createElement('article'); card.className = 'history-card';
-    const link = document.createElement('a'); link.href = imageSource(item.image_src); link.target = '_blank'; link.rel = 'noopener';
-    const image = document.createElement('img'); image.src = link.href; image.alt = item.prompt; image.loading = 'lazy'; link.append(image);
+    card.classList.toggle('selected', state.activeImageItem?.id === item.id);
+    const view = document.createElement('button'); view.type = 'button'; view.className = 'history-open'; view.setAttribute('aria-label', '查看作品：' + item.prompt);
+    const image = document.createElement('img'); image.src = imageSource(item.image_src); image.alt = item.prompt; image.loading = 'lazy'; view.append(image);
+    view.addEventListener('click', () => { showResult(item); renderHistory(); $('#generation-result').scrollIntoView?.({ behavior: 'smooth', block: 'nearest' }); });
     const info = document.createElement('div'); info.className = 'history-info';
     const prompt = document.createElement('p'); prompt.textContent = item.prompt;
     const meta = document.createElement('small'); meta.textContent = `${item.mode === 'image-to-image' ? '图生图' : '文生图'} · ${date(item.created_at)}`;
@@ -203,8 +246,17 @@ function renderHistory() {
     const remove = document.createElement('button'); remove.className = 'delete-history'; remove.textContent = '×'; remove.title = '删除作品';
     remove.addEventListener('click', async () => {
       if (!confirm('删除这张作品？删除后无法恢复，已消耗积分不会退回。')) return;
-      try { await api(`/api/images/history/${encodeURIComponent(item.id)}`, { method: 'DELETE' }); state.history = state.history.filter((value) => value.id !== item.id); renderHistory(); toast('作品已删除'); } catch (error) { toast(error.message, true); }
-    }); card.append(link, info, remove); return card;
+      try {
+        await api(`/api/images/history/${encodeURIComponent(item.id)}`, { method: 'DELETE' });
+        state.history = state.history.filter((value) => value.id !== item.id);
+        if (state.activeImageItem?.id === item.id) {
+          state.activeImageItem = null;
+          $('#generation-result').classList.add('is-hidden');
+          $('#generation-empty').classList.remove('is-hidden');
+        }
+        renderHistory(); toast('作品已删除');
+      } catch (error) { toast(error.message, true); }
+    }); card.append(view, info, remove); return card;
   }));
   $('#history-count').textContent = `${state.history.length} 件作品`; $('#history-empty').classList.toggle('is-hidden', !!state.history.length);
 }

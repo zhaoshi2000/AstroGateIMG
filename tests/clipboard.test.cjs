@@ -21,6 +21,7 @@ class Element {
 async function main() {
   const elements = new Map(); const documentEvents = {};
   const document = {
+    body: new Element(),
     querySelector: (selector) => { if (!elements.has(selector)) elements.set(selector, new Element()); return elements.get(selector); },
     querySelectorAll: () => [], createElement: () => new Element(),
     addEventListener: (name, callback) => { documentEvents[name] = callback; },
@@ -35,6 +36,7 @@ async function main() {
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../app/static/app.js'), 'utf8'), context);
   await new Promise(setImmediate);
+  assert.equal(document.body.classList.contains('studio-theme'), true, 'Studio must use its dedicated dark workspace theme');
   assert.equal(elements.get('#prompt').value, 'Showcase prompt carried into the studio');
   assert.equal(elements.get('#size').value, '864x1536');
   assert.equal(drafts.size, 0, 'Applying a showcase draft must consume it once');
@@ -71,6 +73,24 @@ async function main() {
   documentEvents.paste({ clipboardData: { items: [] }, preventDefault: () => { prevented = true; } });
   assert.equal(prevented, false, 'Ordinary text pasting must keep working');
   vm.runInContext('clearReferences()', context);
+  const historyId = 'a'.repeat(24);
+  const historyImage = `/api/images/files/${historyId}`;
+  context.historyFixture = { id: historyId, image_src: historyImage, prompt: '月光下的云海城堡', mode: 'text-to-image', size: '1024x1024', credits_cost: 1, created_at: '2026-10-19T10:00:00Z' };
+  vm.runInContext('state.history = [historyFixture]; renderHistory()', context);
+  elements.get('#history-grid').children[0].children[0].events.click();
+  assert.equal(elements.get('#result-image').src, historyImage, 'Selecting a history thumbnail must show it on the central canvas');
+  assert.equal(elements.get('#share-result').href, `/?compose=1&image=${historyId}`, 'Selected history retains community sharing');
+  assert.equal(elements.get('#download-result').href, historyImage, 'Selected history retains private download');
+  const zoom = elements.get('#image-zoom-dialog');
+  let zoomOpened = false;
+  zoom.showModal = () => { zoomOpened = true; };
+  elements.get('#zoom-result').events.click();
+  assert.equal(zoomOpened, true, 'Zoom button opens the enlarged artwork');
+  assert.equal(elements.get('#zoom-image').src, historyImage);
+  context.fetch = async (url) => ({ ok: url === historyImage, blob: async () => new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' }) });
+  await elements.get('#use-result-reference').events.click();
+  assert.equal(vm.runInContext('state.references.length', context), 1, 'Current artwork can be used as the next generation reference');
+  assert.equal(elements.get('#generation-mode').textContent, '图生图 · 1 张参考图');
   console.log('PASS: clipboard images, multiple previews, removal, size/count limits, normal text paste');
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; });
