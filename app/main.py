@@ -17,7 +17,7 @@ import secrets
 import sqlite3
 from threading import Lock
 import time
-from typing import Annotated, Any, Callable
+from typing import Annotated, Any, Callable, Literal
 from urllib.parse import urlparse
 
 import httpx
@@ -125,7 +125,12 @@ class EmailRegistrationRequest(EmailCodeRequest):
 class ImageGenerationRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=4000)
     model: str = Field(default="gpt-image-2", pattern=r"^gpt-image-2$")
-    size: str = Field(default="1024x1024", pattern=r"^(1024x1024|1024x1536|1536x1024)$")
+    size: Literal[
+        "1024x1024", "1024x1536", "1536x1024",
+        "1280x960", "960x1280", "1536x864", "864x1536",
+        "1024x1280", "1280x1024", "1536x768", "768x1536",
+        "1792x768", "768x1792",
+    ] = "1024x1024"
     quality: str = Field(default="medium", pattern=r"^(low|medium|high)$")
 
     @field_validator("prompt")

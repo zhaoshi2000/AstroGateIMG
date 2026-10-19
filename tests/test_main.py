@@ -81,6 +81,16 @@ class AstroGateTests(unittest.TestCase):
             self.assertEqual(len(history), 1)
             self.assertEqual(history[0]['mode'], 'image-to-image')
 
+    def test_widescreen_and_phone_ratios_reach_both_image_endpoints(self):
+        with TestClient(self.app(2)) as client:
+            self.register(client)
+            landscape = client.post('/api/images/generations', json={'prompt': 'a wide blue horizon', 'size': '1536x864'})
+            self.assertEqual(landscape.status_code, 200, landscape.text)
+            portrait = client.post('/api/images/edits', json={'prompt': 'a phone wallpaper', 'size': '864x1536', 'image_data_urls': [REFERENCE]})
+            self.assertEqual(portrait.status_code, 200, portrait.text)
+            self.assertEqual([call['size'] for call in self.calls], ['1536x864', '864x1536'])
+            self.assertEqual(portrait.json()['item']['size'], '864x1536')
+
     def test_failed_generation_refunds_credits(self):
         def fail(request):
             return httpx.Response(429, json={'error': {'message': 'no available image quota'}})
