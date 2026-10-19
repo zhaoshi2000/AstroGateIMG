@@ -1,0 +1,72 @@
+const assert = require('node:assert/strict');
+const { page, find, flush } = require('./community.test.cjs');
+const event = () => ({ preventDefault() {} });
+const file = (type = 'image/png', size = 1024) => ({ type, size, data: 'data:' + type + ';base64,dGVzdA==' });
+
+async function main() {
+  const anonymous = await page(null);
+  await anonymous.compose.events.click();
+  assert.equal(anonymous.location.destination, '/login?next=' + encodeURIComponent('/?compose=1'));
+  assert.equal(anonymous.requests.some((request) => request.method === 'POST'), false);
+
+  const view = await page();
+  await view.compose.events.click();
+  assert.equal(view.select('#compose-dialog').open, true);
+  view.select('#post-title').value = '今天的创作记录';
+  view.select('#post-content').value = '<script>这里应该是文字</script>';
+  const submitting = view.select('#post-form').events.submit(event());
+  const duplicate = view.select('#post-form').events.submit(event());
+  await Promise.all([submitting, duplicate]);
+  assert.equal(view.requests.filter((request) => request.url === '/api/community/posts' && request.method === 'POST').length, 1);
+  assert.equal(view.select('#compose-dialog').open, false);
+  assert.equal(view.select('#post-dialog').open, true);
+  assert.equal(view.select('#detail-content').textContent, '<script>这里应该是文字</script>');
+  assert.equal(view.select('#detail-image-pane').classList.contains('is-hidden'), true);
+  assert.equal(view.select('#detail-prompt-section').classList.contains('is-hidden'), true);
+  assert.equal(view.select('#detail-example-note').classList.contains('is-hidden'), true);
+  assert.equal(view.select('#delete-post').classList.contains('is-hidden'), false);
+  view.select('#post-dialog').close();
+  await view.select('#my-posts').events.click();
+  assert.equal(view.select('#gallery-grid').children.length, 1);
+  assert.equal(view.select('#my-posts').attributes['aria-pressed'], 'true');
+  view.events.click({ target: find(view.select('#gallery-grid').children[0], (node) => !!node.dataset.openPost), preventDefault() {} }); await flush();
+  await view.select('#delete-post').events.click();
+  assert.equal(view.select('#gallery-grid').children.length, 0);
+
+  await view.compose.events.click();
+  const pasteEvent = { ...event(), clipboardData: { items: [ { kind: 'file', type: 'image/png', getAsFile: () => file() } ] } };
+  view.events.paste(pasteEvent);
+  assert.equal(view.select('#post-image-previews').children.length, 1);
+  view.select('#post-images').events.change({ target: { files: [file('image/svg+xml')] } });
+  assert.equal(view.select('#post-image-previews').children.length, 1, 'SVG must be rejected');
+  view.select('#post-images').events.change({ target: { files: [file('image/png', 11 * 1024 * 1024)] } });
+  assert.equal(view.select('#post-image-previews').children.length, 1, 'Files above 10MB must be rejected');
+  view.select('#post-images').events.change({ target: { files: Array.from({ length: 9 }, () => file()) } });
+  assert.equal(view.select('#post-image-previews').children.length, 1, 'More than 9 images must be rejected');
+  view.select('#post-images').events.change({ target: { files: [file()] } });
+  assert.equal(view.select('#post-image-previews').children.length, 2);
+  find(view.select('#post-image-previews').children[0], (node) => node.className === 'post-remove-image').events.click();
+  assert.equal(view.select('#post-image-previews').children.length, 1);
+  view.select('#post-title').value = '图片投稿';
+  view.select('#post-prompt').value = '紫色柔光';
+  await view.select('#post-form').events.submit(event());
+  const payload = JSON.parse(view.requests.filter((request) => request.url === '/api/community/posts' && request.method === 'POST').at(-1).body);
+  assert.equal(payload.image_data_urls.length, 1);
+  assert.equal(payload.prompt, '紫色柔光');
+  assert.equal(payload.source_history_id, null);
+  assert.equal(view.select('#detail-image-pane').classList.contains('is-hidden'), false);
+
+  const id = 'b'.repeat(24);
+  const library = await page(undefined, { search: '?compose=1&image=' + id, history: [{ id, image_src: '/api/images/files/' + id, prompt: '我的原始提示词' }] });
+  await flush();
+  assert.equal(library.select('#compose-dialog').open, true);
+  assert.equal(library.select('#post-prompt').value, '我的原始提示词');
+  assert.equal(library.select('#post-image-previews').children.length, 1);
+  library.select('#post-title').value = '分享作品库';
+  await library.select('#post-form').events.submit(event());
+  const shared = JSON.parse(library.requests.find((request) => request.method === 'POST').body);
+  assert.equal(shared.source_history_id, id);
+  assert.equal(shared.image_data_urls.length, 0);
+  console.log('PASS: public posting login gate, text and image posts, duplicate submit guard, paste and upload limits, personal feed, owner deletion, private-library share');
+}
+main().catch((error) => { console.error(error); process.exitCode = 1; });

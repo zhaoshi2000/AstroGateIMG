@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
 import sqlite3
 from threading import Lock
 import time
@@ -21,12 +22,13 @@ from typing import Annotated, Any, Callable, Literal
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import AliasChoices, BaseModel, EmailStr, Field, field_validator
 
 from app.mail import send_registration_code
+from app.community_media import MAX_POST_BYTES, MAX_POST_IMAGES, MAX_UPLOAD_BYTES, store_post_images
 from app.upstream_admin import project_accounts
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -153,6 +155,24 @@ class CommunityLikeRequest(BaseModel):
     liked: bool
 
 
+class CommunityPostRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=100)
+    content: str = Field(default="", max_length=4000)
+    prompt: str = Field(default="", max_length=4000)
+    category: Literal["illustration", "collage", "science", "photography", "design", "general"] = "general"
+    tags: list[Annotated[str, Field(min_length=1, max_length=20)]] = Field(default_factory=list, max_length=5)
+    image_data_urls: list[Annotated[str, Field(max_length=14_000_000)]] = Field(default_factory=list, max_length=MAX_POST_IMAGES)
+    source_history_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{24}$")
+
+    @field_validator("title", "content", "prompt")
+    @classmethod
+    def trim_text(cls, value: str, info) -> str:
+        value = value.strip()
+        if info.field_name == "title" and not value:
+            raise ValueError("请填写帖子标题")
+        return value
+
+
 class UpstreamRefreshRequest(BaseModel):
     account_ids: list[str] = Field(default_factory=list, max_length=500)
 
@@ -277,6 +297,14 @@ def initialize_database(path: Path, settings: Settings) -> None:
                 post_id TEXT NOT NULL, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 created_at TEXT NOT NULL, PRIMARY KEY(post_id, user_id)
             );
+            CREATE TABLE IF NOT EXISTS community_posts (
+                id TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                title TEXT NOT NULL, content TEXT NOT NULL, prompt TEXT NOT NULL,
+                category TEXT NOT NULL, tags_json TEXT NOT NULL, images_json TEXT NOT NULL,
+                size TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS community_posts_by_user ON community_posts(user_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS community_posts_by_date ON community_posts(created_at DESC);
             CREATE TABLE IF NOT EXISTS community_comments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, post_id TEXT NOT NULL,
                 user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -378,11 +406,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             verification_secret = secret_file.read_text().strip()
         yield
 
-    app = FastAPI(title="AstroGate IMG", version="0.5.0", lifespan=lifespan, docs_url=None, redoc_url=None)
+    app = FastAPI(title="AstroGate IMG", version="0.6.0", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
+        if request.method == "POST" and request.url.path == "/api/community/posts":
+            try:
+                if int(request.headers.get("content-length", "0")) > 43 * 1024 * 1024:
+                    return JSONResponse({"detail": "图片合计不能超过 30MB"}, 413)
+            except ValueError:
+                return JSONResponse({"detail": "请求长度无效"}, 400)
         origin = request.headers.get("origin")
         if request.method in {"POST", "DELETE", "PUT", "PATCH"} and origin:
             if urlparse(origin).netloc != request.headers.get("host"):
@@ -430,10 +464,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise
             return None
 
-    def gallery_post(post_id: str):
-        if post_id not in GALLERY_BY_ID:
+    def gallery_post(post_id: str, db):
+        if post_id in GALLERY_BY_ID:
+            return {**GALLERY_BY_ID[post_id], "is_curated": True, "content": "", "created_at": "", "user_id": None}
+        row = db.execute("SELECT p.*, u.username, u.email FROM community_posts p JOIN users u ON u.id = p.user_id WHERE p.id = ?", (post_id,)).fetchone()
+        if not row:
             raise HTTPException(404, "作品不存在")
-        return GALLERY_BY_ID[post_id]
+        images = json.loads(row["images_json"])
+        return {**dict(row), "author": row["email"].split("@")[0] if row["email"] else row["username"],
+                "tags": json.loads(row["tags_json"]), "images": images, "is_curated": False, "comments": [],
+                "alt": row["title"], "width": images[0]["width"] if images else 0, "height": images[0]["height"] if images else 0}
 
     def community_comment(row, user):
         return {"id": row["id"], "author": row["email"].split("@")[0] if row["email"] else row["username"],
@@ -445,47 +485,144 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                  "is_example": True, "can_delete": False, "created_at": None} for index, comment in enumerate(post["comments"])]
 
     def community_post(post, db, user):
-        item = {key: post[key] for key in ("id", "title", "category", "tags", "author", "prompt", "alt", "width", "height", "size")}
-        item["image"] = f"/assets/gallery/{post['id']}.webp"
-        item["thumbnail"] = f"/assets/gallery/{post['id']}-preview.webp"
-        item["likes_count"] = db.execute("SELECT COUNT(*) FROM community_likes WHERE post_id = ?", (post["id"],)).fetchone()[0]
+        item = {key: post[key] for key in ("id", "title", "category", "tags", "author", "prompt", "alt", "width", "height", "size", "content", "created_at", "is_curated")}
+        item["images"] = [{"image": f"/assets/gallery/{post['id']}.webp", "thumbnail": f"/assets/gallery/{post['id']}-preview.webp", "width": post["width"], "height": post["height"]}] if post["is_curated"] else post["images"]
+        item["image"] = item["images"][0]["image"] if item["images"] else ""
+        item["thumbnail"] = item["images"][0]["thumbnail"] if item["images"] else ""
+        item["is_mine"] = bool(user and post["user_id"] == user["id"])
+        item["can_delete"] = bool(not post["is_curated"] and user and (item["is_mine"] or user["is_admin"]))
+        item["example_likes_count"] = post.get("example_likes", 0) if post["is_curated"] else 0
+        item["real_likes_count"] = db.execute("SELECT COUNT(*) FROM community_likes WHERE post_id = ?", (post["id"],)).fetchone()[0]
+        item["likes_count"] = item["real_likes_count"] + item["example_likes_count"]
         item["liked"] = bool(user and db.execute("SELECT 1 FROM community_likes WHERE post_id = ? AND user_id = ?", (post["id"], user["id"])).fetchone())
         item["comments_count"] = len(post["comments"]) + db.execute("SELECT COUNT(*) FROM community_comments WHERE post_id = ?", (post["id"],)).fetchone()[0]
         latest = db.execute("SELECT c.*, u.username, u.email FROM community_comments c JOIN users u ON u.id = c.user_id WHERE c.post_id = ? ORDER BY c.id DESC LIMIT 1", (post["id"],)).fetchone()
-        item["comment_preview"] = community_comment(latest, user) if latest else example_comments(post)[0]
+        examples = example_comments(post)
+        item["comment_preview"] = community_comment(latest, user) if latest else (examples[0] if examples else None)
         item["last_commented_at"] = latest["created_at"] if latest else ""
         return item
 
     @app.get("/api/community/posts")
-    def list_community_posts(user=Depends(optional_user)):
+    def list_community_posts(page: int = Query(default=0, ge=0, le=10000), mine: bool = False, user=Depends(optional_user)):
+        if mine and not user:
+            raise HTTPException(401, "请先登录")
         with database_connection(database_path) as db:
-            items = [community_post(post, db, user) for post in GALLERY_POSTS]
-        return {"items": items, "user": {key: user[key] for key in ("id", "display_name", "is_admin")} if user else None}
+            where, params = ("WHERE user_id = ?", [user["id"]]) if mine else ("", [])
+            rows = db.execute(f"SELECT id FROM community_posts {where} ORDER BY created_at DESC, id DESC LIMIT 31 OFFSET ?", (*params, page * 30)).fetchall()
+            items = [community_post(gallery_post(row["id"], db), db, user) for row in rows[:30]]
+            if page == 0 and not mine:
+                items.extend(community_post(gallery_post(post["id"], db), db, user) for post in GALLERY_POSTS)
+        return {"items": items, "has_more": len(rows) > 30, "page": page,
+                "user": {key: user[key] for key in ("id", "display_name", "is_admin")} if user else None}
+
+    @app.post("/api/community/posts", status_code=201)
+    def publish_community_post(body: CommunityPostRequest, user=Depends(current_user)):
+        if body.source_history_id and body.image_data_urls:
+            raise HTTPException(400, "请选择上传图片或作品库图片中的一种方式")
+        images = []
+        size = "1024x1024"
+        with database_connection(database_path) as db:
+            if db.execute("SELECT COUNT(*) FROM community_posts WHERE user_id = ? AND created_at > ?", (user["id"], (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat())).fetchone()[0] >= 3:
+                raise HTTPException(429, "发布太快了，请稍后再试", headers={"Retry-After": "60"})
+            if body.source_history_id:
+                source = db.execute("SELECT * FROM image_history WHERE id = ? AND user_id = ? AND status = 'succeeded'", (body.source_history_id, user["id"])).fetchone()
+                if not source:
+                    raise HTTPException(404, "作品不存在或不属于当前账号")
+                for extension in ("png", "jpg", "webp"):
+                    path = image_dir / f"{body.source_history_id}.{extension}"
+                    if path.is_file():
+                        images.append(path.read_bytes())
+                        break
+                if not images:
+                    raise HTTPException(404, "作品图片不存在")
+                size = source["size"]
+        total = 0
+        for value in body.image_data_urls:
+            header, separator, encoded = value.partition(",")
+            if not separator or header not in {"data:image/png;base64", "data:image/jpeg;base64", "data:image/webp;base64"}:
+                raise HTTPException(400, "仅支持 PNG、JPG 或 WebP 图片")
+            try:
+                data = base64.b64decode(encoded, validate=True)
+            except (ValueError, binascii.Error) as exc:
+                raise HTTPException(400, "图片编码无效") from exc
+            total += len(data)
+            if len(data) > MAX_UPLOAD_BYTES or total > MAX_POST_BYTES:
+                raise HTTPException(400, "单张不超过 10MB，合计不超过 30MB")
+            images.append(data)
+        if not images and not body.content:
+            raise HTTPException(400, "请添加图片或写一点帖子正文")
+        post_id = "post-" + secrets.token_hex(12)
+        directory = config.data_dir / "community" / post_id
+        try:
+            media = store_post_images(images, directory, post_id) if images else []
+            with database_connection(database_path) as db:
+                db.execute("BEGIN IMMEDIATE")
+                if db.execute("SELECT COUNT(*) FROM community_posts WHERE user_id = ? AND created_at > ?", (user["id"], (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat())).fetchone()[0] >= 3:
+                    raise HTTPException(429, "发布太快了，请稍后再试", headers={"Retry-After": "60"})
+                db.execute("INSERT INTO community_posts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                           (post_id, user["id"], body.title, body.content, body.prompt, body.category,
+                            json.dumps(list(dict.fromkeys(tag.strip() for tag in body.tags if tag.strip())), ensure_ascii=False), json.dumps(media), size, now_iso()))
+                item = community_post(gallery_post(post_id, db), db, user)
+        except BaseException:
+            if directory.is_dir():
+                shutil.rmtree(directory)
+            raise
+        return {"item": item}
+
+    @app.get("/community-media/{post_id}/{filename}")
+    def community_media(post_id: str, filename: str):
+        if not re.fullmatch(r"post-[0-9a-f]{24}", post_id) or not re.fullmatch(r"[0-8](?:-preview)?\.webp", filename):
+            raise HTTPException(404, "图片不存在")
+        with database_connection(database_path) as db:
+            if not db.execute("SELECT 1 FROM community_posts WHERE id = ?", (post_id,)).fetchone():
+                raise HTTPException(404, "图片不存在")
+        path = config.data_dir / "community" / post_id / filename
+        if not path.is_file():
+            raise HTTPException(404, "图片不存在")
+        return FileResponse(path, media_type="image/webp", headers={"Cache-Control": "no-cache"})
+
+    @app.delete("/api/community/posts/{post_id}")
+    def delete_community_post(post_id: str, user=Depends(current_user)):
+        with database_connection(database_path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            post = gallery_post(post_id, db)
+            if post["is_curated"] or (post["user_id"] != user["id"] and not user["is_admin"]):
+                raise HTTPException(403, "只能删除自己的帖子")
+            db.execute("DELETE FROM community_comments WHERE post_id = ?", (post_id,))
+            db.execute("DELETE FROM community_likes WHERE post_id = ?", (post_id,))
+            db.execute("DELETE FROM community_posts WHERE id = ?", (post_id,))
+        if re.fullmatch(r"post-[0-9a-f]{24}", post_id):
+            directory = config.data_dir / "community" / post_id
+            if directory.is_dir():
+                shutil.rmtree(directory)
+        return {"ok": True}
 
     @app.get("/api/community/posts/{post_id}")
     def get_community_post(post_id: str, user=Depends(optional_user)):
-        post = gallery_post(post_id)
         with database_connection(database_path) as db:
+            post = gallery_post(post_id, db)
             item = community_post(post, db, user)
             comments = db.execute("SELECT c.*, u.username, u.email FROM community_comments c JOIN users u ON u.id = c.user_id WHERE c.post_id = ? ORDER BY c.id DESC LIMIT 100", (post_id,)).fetchall()
         return {"item": item, "comments": example_comments(post) + [community_comment(row, user) for row in reversed(comments)]}
 
     @app.post("/api/community/posts/{post_id}/like")
     def set_community_like(post_id: str, body: CommunityLikeRequest, user=Depends(current_user)):
-        gallery_post(post_id)
         with database_connection(database_path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            post = gallery_post(post_id, db)
             if body.liked:
                 db.execute("INSERT OR IGNORE INTO community_likes VALUES (?, ?, ?)", (post_id, user["id"], now_iso()))
             else:
                 db.execute("DELETE FROM community_likes WHERE post_id = ? AND user_id = ?", (post_id, user["id"]))
             count = db.execute("SELECT COUNT(*) FROM community_likes WHERE post_id = ?", (post_id,)).fetchone()[0]
-        return {"liked": body.liked, "likes_count": count}
+        return {"liked": body.liked, "real_likes_count": count, "likes_count": count + post.get("example_likes", 0)}
 
     @app.post("/api/community/posts/{post_id}/comments", status_code=201)
     def add_community_comment(post_id: str, body: CommunityCommentRequest, request: Request, user=Depends(current_user)):
-        post = gallery_post(post_id)
         rate_limit(request, "community-comment", 10, 60)
         with database_connection(database_path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            post = gallery_post(post_id, db)
             cursor = db.execute("INSERT INTO community_comments (post_id, user_id, content, created_at) VALUES (?, ?, ?, ?)", (post_id, user["id"], body.content, now_iso()))
             row = db.execute("SELECT c.*, u.username, u.email FROM community_comments c JOIN users u ON u.id = c.user_id WHERE c.id = ?", (cursor.lastrowid,)).fetchone()
             count = len(post["comments"]) + db.execute("SELECT COUNT(*) FROM community_comments WHERE post_id = ?", (post_id,)).fetchone()[0]

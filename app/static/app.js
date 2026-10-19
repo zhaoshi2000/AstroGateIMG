@@ -33,7 +33,7 @@ function date(value) { try { return new Intl.DateTimeFormat('zh-CN', { month: '2
 function imageSource(value) { return typeof value === 'string' && (/^\/api\/images\/files\/[0-9a-f]{24}$/.test(value) || /^https?:\/\//.test(value) || /^data:image\/(png|jpeg|webp);base64,/.test(value)) ? value : ''; }
 function setBalance(balance) { if (state.user) state.user.credits = balance; $('#top-credits').textContent = balance; $('#wallet-balance').textContent = balance; }
 async function refreshUser() { const data = await api('/api/auth/me'); state.user = data.user; setBalance(data.user.credits); }
-function authDestination() { const next = new URLSearchParams(location.search).get('next'); return /^\/\?post=[a-z0-9-]+$/.test(next || '') ? next : state.user?.is_admin ? '/admin' : '/studio'; }
+function authDestination() { const next = new URLSearchParams(location.search).get('next'); return /^\/\?(?:post=[a-z0-9-]+|mine=1|compose=1(?:&image=[0-9a-f]{24})?)$/.test(next || '') ? next : state.user?.is_admin ? '/admin' : '/studio'; }
 
 function authMode(mode) {
   state.mode = mode;
@@ -188,6 +188,7 @@ function showResult(item) {
   $('#generation-empty').classList.add('is-hidden'); $('#generation-result').classList.remove('is-hidden');
   $('#result-image').src = src; $('#result-full').href = src; $('#download-result').href = src;
   $('#result-prompt').textContent = item.prompt;
+  $('#share-result').href = '/?compose=1&image=' + encodeURIComponent(item.id);
   $('#result-meta').replaceChildren(...[item.mode === 'image-to-image' ? `图生图 · ${item.reference_count || 1} 张参考图` : '文生图', item.size, `${item.credits_cost ?? 1} 积分`].map((value) => { const el = document.createElement('span'); el.textContent = value; return el; }));
 }
 function renderHistory() {
@@ -197,7 +198,8 @@ function renderHistory() {
     const image = document.createElement('img'); image.src = link.href; image.alt = item.prompt; image.loading = 'lazy'; link.append(image);
     const info = document.createElement('div'); info.className = 'history-info';
     const prompt = document.createElement('p'); prompt.textContent = item.prompt;
-    const meta = document.createElement('small'); meta.textContent = `${item.mode === 'image-to-image' ? '图生图' : '文生图'} · ${date(item.created_at)}`; info.append(prompt, meta);
+    const meta = document.createElement('small'); meta.textContent = `${item.mode === 'image-to-image' ? '图生图' : '文生图'} · ${date(item.created_at)}`;
+    const share = document.createElement('a'); share.className = 'history-share'; share.href = '/?compose=1&image=' + encodeURIComponent(item.id); share.textContent = '分享到社区 ↗'; info.append(prompt, meta, share);
     const remove = document.createElement('button'); remove.className = 'delete-history'; remove.textContent = '×'; remove.title = '删除作品';
     remove.addEventListener('click', async () => {
       if (!confirm('删除这张作品？删除后无法恢复，已消耗积分不会退回。')) return;
