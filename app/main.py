@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
-import json
 import os
 from pathlib import Path
 import re
@@ -15,7 +14,7 @@ import sqlite3
 from typing import Annotated, Any
 
 import httpx
-from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -75,9 +74,13 @@ class Credentials(BaseModel):
 
 class ImageGenerationRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=4_000)
-    model: str = Field(default="gpt-image-1", min_length=1, max_length=100)
+    model: str = Field(default="gpt-image-2", min_length=1, max_length=100)
     size: str = Field(default="1024x1024", pattern=r"^(1024x1024|1024x1536|1536x1024)$")
     quality: str = Field(default="medium", pattern=r"^(low|medium|high)$")
+
+
+class ImageEditRequest(ImageGenerationRequest):
+    image_data_url: str = Field(min_length=16)
 
 
 def utc_now() -> datetime:
@@ -134,6 +137,7 @@ def initialize_database(path: Path) -> None:
                 model TEXT NOT NULL,
                 size TEXT NOT NULL,
                 quality TEXT NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'text-to-image',
                 image_src TEXT,
                 status TEXT NOT NULL,
                 error_message TEXT,
@@ -144,6 +148,9 @@ def initialize_database(path: Path) -> None:
             CREATE INDEX IF NOT EXISTS sessions_by_expiry ON sessions(expires_at);
             """
         )
+        columns = {str(row[1]) for row in database.execute("PRAGMA table_info(image_history)").fetchall()}
+        if "mode" not in columns:
+            database.execute("ALTER TABLE image_history ADD COLUMN mode TEXT NOT NULL DEFAULT 'text-to-image'")
 
 
 def validate_username(username: str) -> str:
@@ -182,6 +189,15 @@ def hash_session(token: str) -> str:
 
 def public_user(row: sqlite3.Row) -> dict[str, Any]:
     return {"id": row["id"], "username": row["username"], "created_at": row["created_at"]}
+
+
+def image_error_detail(payload: object) -> str:
+    if not isinstance(payload, dict):
+        return "上游图片服务返回错误"
+    detail = payload.get("error") or payload.get("detail") or "上游图片服务返回错误"
+    if isinstance(detail, dict):
+        detail = detail.get("message") or detail.get("error") or "上游图片服务返回错误"
+    return str(detail)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -288,7 +304,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with database_connection(database_path) as database:
             rows = database.execute(
                 """
-                SELECT id, prompt, model, size, quality, image_src, status, error_message, created_at
+                SELECT id, prompt, model, size, quality, mode, image_src, status, error_message, created_at
                 FROM image_history WHERE user_id = ? ORDER BY created_at DESC LIMIT 60
                 """,
                 (user["id"],),
@@ -322,8 +338,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
             response_payload = upstream_response.json()
             if upstream_response.is_error:
-                detail = response_payload.get("error") or response_payload.get("detail") or "上游图片服务返回错误"
-                raise HTTPException(status_code=502, detail=str(detail))
+                raise HTTPException(
+                    status_code=429 if upstream_response.status_code == 429 else 502,
+                    detail=image_error_detail(response_payload),
+                )
             images = response_payload.get("data") if isinstance(response_payload, dict) else None
             first_image = images[0] if isinstance(images, list) and images and isinstance(images[0], dict) else {}
             image_src = str(first_image.get("url") or "").strip()
@@ -340,8 +358,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with database_connection(database_path) as database:
             database.execute(
                 """
-                INSERT INTO image_history (id, user_id, prompt, model, size, quality, image_src, status, error_message, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'succeeded', NULL, ?)
+                INSERT INTO image_history (id, user_id, prompt, model, size, quality, mode, image_src, status, error_message, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'text-to-image', ?, 'succeeded', NULL, ?)
                 """,
                 (request_id, user["id"], body.prompt.strip(), body.model.strip(), body.size, body.quality, image_src, created_at),
             )
@@ -352,6 +370,94 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "model": body.model.strip(),
                 "size": body.size,
                 "quality": body.quality,
+                "mode": "text-to-image",
+                "image_src": image_src,
+                "status": "succeeded",
+                "created_at": created_at,
+            }
+        }
+
+    @app.post("/api/images/edits")
+    async def edit_image(body: ImageEditRequest, user: dict[str, Any] = Depends(current_user)) -> dict[str, object]:
+        if not app_settings.upstream_url or not app_settings.upstream_api_key:
+            raise HTTPException(status_code=503, detail="服务尚未配置上游图片接口")
+        header, separator, encoded_image = body.image_data_url.partition(",")
+        if not separator or not header.lower().startswith("data:image/") or ";base64" not in header.lower():
+            raise HTTPException(status_code=400, detail="参考图格式无效")
+        mime_type = header[5:].split(";", 1)[0].strip().lower()
+        if mime_type not in {"image/png", "image/jpeg", "image/webp"}:
+            raise HTTPException(status_code=400, detail="参考图仅支持 PNG、JPG 和 WebP")
+        try:
+            image_bytes = base64.b64decode(encoded_image, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise HTTPException(status_code=400, detail="参考图数据无效") from exc
+        if not image_bytes:
+            raise HTTPException(status_code=400, detail="参考图不能为空")
+        if len(image_bytes) > 50 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="参考图不能超过 50MB")
+        valid_signature = (
+            (mime_type == "image/png" and image_bytes.startswith(b"\x89PNG\r\n\x1a\n"))
+            or (mime_type == "image/jpeg" and image_bytes.startswith(b"\xff\xd8\xff"))
+            or (mime_type == "image/webp" and image_bytes.startswith(b"RIFF") and image_bytes[8:12] == b"WEBP")
+        )
+        if not valid_signature:
+            raise HTTPException(status_code=400, detail="参考图内容与文件格式不匹配")
+        extension = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}[mime_type]
+        payload = {
+            "prompt": body.prompt.strip(),
+            "model": body.model.strip(),
+            "n": 1,
+            "size": body.size,
+            "quality": body.quality,
+            "response_format": "b64_json",
+            "images": [{"b64_json": encoded_image, "filename": f"reference.{extension}", "mime_type": mime_type}],
+        }
+        request_id = secrets.token_hex(12)
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(150.0, connect=15.0),
+                transport=app_settings.upstream_transport,
+            ) as client:
+                upstream_response = await client.post(
+                    f"{app_settings.upstream_url}/v1/images/edits",
+                    headers={"Authorization": f"Bearer {app_settings.upstream_api_key}"},
+                    json=payload,
+                )
+            response_payload = upstream_response.json()
+            if upstream_response.is_error:
+                raise HTTPException(
+                    status_code=429 if upstream_response.status_code == 429 else 502,
+                    detail=image_error_detail(response_payload),
+                )
+            images = response_payload.get("data") if isinstance(response_payload, dict) else None
+            first_image = images[0] if isinstance(images, list) and images and isinstance(images[0], dict) else {}
+            image_src = str(first_image.get("url") or "").strip()
+            if not image_src and first_image.get("b64_json"):
+                image_src = f"data:image/png;base64,{first_image['b64_json']}"
+            if not image_src:
+                raise HTTPException(status_code=502, detail="上游未返回图片数据")
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail="无法连接上游图片服务") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=502, detail="上游返回了无法识别的数据") from exc
+
+        created_at = utc_iso()
+        with database_connection(database_path) as database:
+            database.execute(
+                """
+                INSERT INTO image_history (id, user_id, prompt, model, size, quality, mode, image_src, status, error_message, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'image-to-image', ?, 'succeeded', NULL, ?)
+                """,
+                (request_id, user["id"], body.prompt.strip(), body.model.strip(), body.size, body.quality, image_src, created_at),
+            )
+        return {
+            "item": {
+                "id": request_id,
+                "prompt": body.prompt.strip(),
+                "model": body.model.strip(),
+                "size": body.size,
+                "quality": body.quality,
+                "mode": "image-to-image",
                 "image_src": image_src,
                 "status": "succeeded",
                 "created_at": created_at,

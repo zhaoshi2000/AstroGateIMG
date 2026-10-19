@@ -1,4 +1,4 @@
-const state = { mode: "login", user: null, history: [] };
+const state = { mode: "login", user: null, history: [], referenceImage: "", referenceName: "" };
 const $ = (selector) => document.querySelector(selector);
 
 function errorText(payload) {
@@ -64,7 +64,7 @@ function createHistoryCard(item) {
   const info = document.createElement("div");
   info.className = "history-info";
   const prompt = document.createElement("p"); prompt.textContent = item.prompt;
-  const date = document.createElement("span"); date.textContent = `${item.model} · ${formattedDate(item.created_at)}`;
+  const date = document.createElement("span"); date.textContent = `${item.mode === "image-to-image" ? "图生图" : "文生图"} · ${item.model} · ${formattedDate(item.created_at)}`;
   info.append(prompt, date);
   const remove = document.createElement("button");
   remove.className = "delete-history"; remove.type = "button"; remove.textContent = "×"; remove.title = "删除记录";
@@ -156,6 +156,32 @@ document.querySelectorAll("[data-prompt]").forEach((button) => button.addEventLi
   $("#prompt").focus();
 }));
 
+$("#reference-image").addEventListener("change", () => {
+  const file = $("#reference-image").files?.[0];
+  if (!file) return;
+  if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) return showToast("仅支持 PNG、JPG 或 WebP 图片", true);
+  if (file.size > 50 * 1024 * 1024) return showToast("参考图不能超过 50MB", true);
+  const reader = new FileReader();
+  reader.onload = () => {
+    state.referenceImage = String(reader.result || "");
+    state.referenceName = file.name;
+    $("#reference-preview-image").src = state.referenceImage;
+    $("#reference-name").textContent = file.name;
+    $("#reference-preview").classList.remove("is-hidden");
+    $(".reference-picker").classList.add("is-hidden");
+    $("#generate-button span:last-child").textContent = "开始图生图";
+  };
+  reader.readAsDataURL(file);
+});
+
+$("#remove-reference").addEventListener("click", () => {
+  state.referenceImage = ""; state.referenceName = "";
+  $("#reference-image").value = "";
+  $("#reference-preview").classList.add("is-hidden");
+  $(".reference-picker").classList.remove("is-hidden");
+  $("#generate-button span:last-child").textContent = "开始生成";
+});
+
 $("#generation-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const button = $("#generate-button");
@@ -163,15 +189,18 @@ $("#generation-form").addEventListener("submit", async (event) => {
   if (!prompt) return showToast("先描述你想生成的画面", true);
   button.disabled = true; button.innerHTML = '<span class="spark">✦</span><span>正在生成…</span>';
   try {
-    const data = await api("/api/images/generations", { method: "POST", body: JSON.stringify({
+    const generationPayload = {
       prompt, model: $("#model").value, size: $("#size").value, quality: $("#quality").value,
-    }) });
+    };
+    const endpoint = state.referenceImage ? "/api/images/edits" : "/api/images/generations";
+    if (state.referenceImage) generationPayload.image_data_url = state.referenceImage;
+    const data = await api(endpoint, { method: "POST", body: JSON.stringify(generationPayload) });
     showResult(data.item);
     state.history.unshift(data.item); renderHistory();
     showToast("作品已生成并保存到图集");
     $("#generation-result").scrollIntoView({ behavior: "smooth", block: "nearest" });
   } catch (error) { showToast(error.message, true); }
-  finally { button.disabled = false; button.innerHTML = '<span class="spark">✦</span><span>开始生成</span>'; }
+  finally { button.disabled = false; button.innerHTML = `<span class="spark">✦</span><span>${state.referenceImage ? "开始图生图" : "开始生成"}</span>`; }
 });
 
 $("#logout-button").addEventListener("click", async () => {

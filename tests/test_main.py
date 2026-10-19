@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -9,6 +10,9 @@ import httpx
 from fastapi.testclient import TestClient
 
 from app.main import Settings, create_app
+
+
+TEST_PNG = base64.b64encode(b"\x89PNG\r\n\x1a\nimage-bytes").decode("ascii")
 
 
 class AstroGateImageTests(unittest.TestCase):
@@ -66,6 +70,37 @@ class AstroGateImageTests(unittest.TestCase):
                 history = client.get("/api/images/history").json()["items"]
                 self.assertEqual(len(history), 1)
                 self.assertEqual(history[0]["prompt"], "a glowing observatory")
+
+    def test_image_edit_forwards_reference_image_and_saves_mode(self) -> None:
+        def upstream_handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.url.path, "/v1/images/edits")
+            payload = json.loads(request.content)
+            self.assertEqual(payload["prompt"], "make it sunset")
+            self.assertEqual(payload["images"][0]["b64_json"], TEST_PNG)
+            return httpx.Response(200, json={"data": [{"b64_json": "cmVzdWx0"}]})
+
+        with TemporaryDirectory() as temporary_directory:
+            settings = Settings(Path(temporary_directory), "https://upstream.example", "upstream-key", False, httpx.MockTransport(upstream_handler))
+            with TestClient(create_app(settings)) as client:
+                client.post("/api/auth/register", json={"username": "artist_edit", "password": "secure-password-42"})
+                response = client.post("/api/images/edits", json={
+                    "prompt": "make it sunset",
+                    "image_data_url": f"data:image/png;base64,{TEST_PNG}",
+                })
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["item"]["mode"], "image-to-image")
+                self.assertEqual(client.get("/api/images/history").json()["items"][0]["mode"], "image-to-image")
+
+    def test_image_edit_rejects_invalid_reference_image(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            settings = Settings(Path(temporary_directory), "https://upstream.example", "upstream-key", False)
+            with TestClient(create_app(settings)) as client:
+                client.post("/api/auth/register", json={"username": "artist_bad_image", "password": "secure-password-42"})
+                response = client.post("/api/images/edits", json={
+                    "prompt": "make it sunset", "image_data_url": "data:image/png;base64,aGVsbG8=",
+                })
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(client.get("/api/images/history").json()["items"], [])
 
 
 if __name__ == "__main__":

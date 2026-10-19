@@ -7,6 +7,7 @@ AstroGate IMG 是一个可自托管的图像创作客户端。用户注册后拥
 - 账号注册、登录和退出，密码使用 PBKDF2-SHA256 哈希保存。
 - 仅使用 HttpOnly 会话 Cookie，登录状态有效期为 14 天。
 - 图片提示词、模型、画幅和质量选择。
+- 上传 PNG、JPG 或 WebP 参考图，按提示词进行图生图；上传图片最大 50MB。
 - 每位用户独立保存和删除自己的生成记录。
 - 深色创作工作台，适配桌面和手机浏览器。
 - 上游接口地址和密钥仅保存在服务端环境变量中，不会发送给浏览器。
@@ -45,7 +46,7 @@ ASTROGATE_UPSTREAM_API_KEY=your-upstream-api-key
 | `ASTROGATE_DATA_DIR` | SQLite 数据目录，默认 `./data`。 |
 | `ASTROGATE_COOKIE_SECURE` | HTTPS 部署时设为 `true`。本地 HTTP 使用 `false`。 |
 
-图片生成请求会转发至：`POST {ASTROGATE_UPSTREAM_URL}/v1/images/generations`。
+文生图请求转发至 `POST {ASTROGATE_UPSTREAM_URL}/v1/images/generations`，图生图请求转发至 `POST {ASTROGATE_UPSTREAM_URL}/v1/images/edits`。在工作台填写提示词后，可直接生成；添加参考图后则切换为图生图。结果会保存到当前账号的个人图集。
 
 ## 开发与验证
 
@@ -53,7 +54,7 @@ ASTROGATE_UPSTREAM_API_KEY=your-upstream-api-key
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-测试覆盖注册、重复账号拦截、登录、退出、会话校验、个人历史隔离入口和未配置上游时的处理。
+测试覆盖注册、重复账号拦截、登录、退出、会话校验、文生图、图生图和参考图格式校验。
 
 ## 部署说明
 
