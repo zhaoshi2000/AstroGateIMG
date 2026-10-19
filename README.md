@@ -65,7 +65,9 @@ ASTROGATE_SMTP_SENDER=noreply@astrogate.sbs
 | `/register`、`/login` | 邮箱验证码注册、邮箱或已有账号登录 |
 | `/studio` | 图片创作和个人作品库 |
 | `/wallet` | 积分余额、兑换码充值、积分流水 |
-| `/admin` | 管理员用户积分调整和兑换码管理 |
+| `/admin`、`/admin/login` | 独立的管理员登录与运营概览 |
+| `/admin/accounts` | 上游账号池、剩余图片额度与上游刷新 |
+| `/admin/users`、`/admin/codes` | 用户积分调整与兑换码管理 |
 
 ## 作品社区
 
@@ -78,6 +80,10 @@ ASTROGATE_SMTP_SENDER=noreply@astrogate.sbs
 作品资料位于 `app/gallery_catalog.json`，网页图片位于 `app/static/gallery/`。需要重新处理源图片时，安装 Pillow 后执行 `python scripts/prepare_gallery_assets.py D:/Down`；脚本生成完整画幅和预览 WebP，保持构图并避免首页加载原始 PNG。
 
 ## 积分运营
+
+管理端使用独立的 `admin.html`、`admin.css` 和 `admin.js`，与客户工作台分开。管理员登录后默认进入 `/admin`，普通客户无法访问管理数据。后台显示上游账号的邮箱、套餐、状态、剩余图片次数、重置时间和成功/失败次数，支持按账号筛选及手动刷新额度。
+
+上游凭据只在服务端使用；管理页面接收的是白名单字段，不返回 access token、refresh token 或内部上游密钥。同一账号的多条凭据合并显示，汇总仅累计正常账号的剩余图片额度。页面每 30 秒读取一次当前额度，点击刷新按钮会启动上游实时查询并显示进度。
 
 管理员登录后打开 `/admin`，在“生成兑换码”中填写单码积分、数量和有效天数。完整兑换码只在创建时返回，请复制保存后交付给用户。用户在 `/wallet` 输入兑换码，积分立即到账。
 
@@ -111,6 +117,7 @@ node --check app/static/app.js
 node tests/clipboard.test.cjs
 node tests/email-code.test.cjs
 node tests/community.test.cjs
+node tests/admin.test.cjs
 ```
 
 测试覆盖 15 张社区作品的资料完整性、点赞幂等、评论持久化与删除权限、公开资料隐私、分类与搜索、提示词带入与安全登录返回；也覆盖邮箱验证、积分计费、失败退款、多图转发、并发防透支和个人作品隔离。

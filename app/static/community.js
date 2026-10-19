@@ -142,7 +142,7 @@
   async function initialize() {
     try {
       const data = await api('/api/community/posts'); state.posts = data.items; state.user = data.user;
-      if (state.user) { $('#community-login').textContent = state.user.display_name; $('#community-login').href = '/studio'; }
+      if (state.user) { $('#community-login').textContent = state.user.is_admin ? '管理后台' : state.user.display_name; $('#community-login').href = state.user.is_admin ? '/admin' : '/studio'; }
       renderGallery(); const id = new URLSearchParams(location.search).get('post'); if (id) await openPost(id);
     } catch (error) {
       const message = element('p', 'gallery-loading', '灵感画廊暂未加载成功。'); const retry = action('text-button', '重新加载'); retry.addEventListener('click', initialize); message.append(document.createTextNode(' '), retry); $('#gallery-grid').replaceChildren(message); $('#gallery-grid').setAttribute('aria-busy', 'false'); toast(error.message, true);

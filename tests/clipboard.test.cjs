@@ -43,6 +43,9 @@ async function main() {
   context.location.search = '?next=' + encodeURIComponent('//untrusted.example');
   assert.equal(vm.runInContext('authDestination()', context), '/studio', 'Login must reject external redirect destinations');
   context.location.search = '';
+  vm.runInContext('state.user.is_admin = true', context);
+  assert.equal(vm.runInContext('authDestination()', context), '/admin', 'Administrators must land in the independent console');
+  vm.runInContext('state.user.is_admin = false', context);
   vm.runInContext("authMode('register')", context);
   assert.equal(elements.get('#username').type, 'email', 'Registration must request an email address');
   assert.equal(elements.get('#email-code').required, true, 'Registration must require an email code');

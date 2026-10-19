@@ -27,6 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import AliasChoices, BaseModel, EmailStr, Field, field_validator
 
 from app.mail import send_registration_code
+from app.upstream_admin import project_accounts
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 STATIC_DIR = ROOT_DIR / "app" / "static"
@@ -150,6 +151,10 @@ class ImageEditRequest(ImageGenerationRequest):
 
 class CommunityLikeRequest(BaseModel):
     liked: bool
+
+
+class UpstreamRefreshRequest(BaseModel):
+    account_ids: list[str] = Field(default_factory=list, max_length=500)
 
 
 class CommunityCommentRequest(BaseModel):
@@ -373,7 +378,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             verification_secret = secret_file.read_text().strip()
         yield
 
-    app = FastAPI(title="AstroGate IMG", version="0.4.0", lifespan=lifespan, docs_url=None, redoc_url=None)
+    app = FastAPI(title="AstroGate IMG", version="0.5.0", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
 
     @app.middleware("http")
@@ -513,9 +518,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/login")
     @app.get("/register")
     @app.get("/wallet")
-    @app.get("/admin")
     def studio():
         return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+
+    @app.get("/admin")
+    @app.get("/admin/login")
+    @app.get("/admin/accounts")
+    @app.get("/admin/users")
+    @app.get("/admin/codes")
+    def admin_page():
+        return FileResponse(STATIC_DIR / "admin.html", headers={"Cache-Control": "no-store"})
 
     @app.get("/health")
     def health():
@@ -616,6 +628,76 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/auth/me")
     def me(user=Depends(current_user)):
         return {"user": user}
+
+    @app.post("/api/admin/login")
+    def admin_login(body: Credentials, response: Response, request: Request):
+        rate_limit(request, "admin-login", 10, 60)
+        with database_connection(database_path) as db:
+            row = db.execute("SELECT * FROM users WHERE username = ?", (body.username,)).fetchone()
+        if not row or not row["is_admin"] or not verify_password(body.password, row["password_hash"]):
+            raise HTTPException(401, "管理员账号或密码错误")
+        issue_session(response, row["id"])
+        return {"user": public_user(row)}
+
+    @app.get("/api/admin/me")
+    def admin_me(user=Depends(admin_user)):
+        return {"user": user}
+
+    async def upstream_admin_request(method, path, body=None):
+        if not config.upstream_url or not config.upstream_api_key:
+            raise HTTPException(503, "上游管理连接尚未配置")
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(35, connect=10), transport=config.upstream_transport, trust_env=False) as client:
+                response = await client.request(method, config.upstream_url + path, headers={"Authorization": f"Bearer {config.upstream_api_key}"}, json=body)
+                if response.is_error:
+                    raise HTTPException(502, f"上游管理接口返回 HTTP {response.status_code}")
+                data = response.json()
+                if not isinstance(data, dict):
+                    raise ValueError("invalid response")
+                return data
+        except (httpx.HTTPError, ValueError) as exc:
+            raise HTTPException(502, "上游管理暂时无法连接，请稍后重试") from exc
+
+    @app.get("/api/admin/upstream/accounts")
+    async def upstream_accounts(user=Depends(admin_user)):
+        result = await upstream_admin_request("GET", "/api/accounts")
+        public, _ = project_accounts(result.get("items") or [])
+        return {**public, "queried_at": now_iso()}
+
+    @app.post("/api/admin/upstream/refresh")
+    async def upstream_refresh(body: UpstreamRefreshRequest, request: Request, user=Depends(admin_user)):
+        rate_limit(request, "admin-upstream-refresh", 6, 60)
+        result = await upstream_admin_request("GET", "/api/accounts")
+        _, token_groups = project_accounts(result.get("items") or [])
+        ids = body.account_ids or list(token_groups)
+        if not ids or any(key not in token_groups for key in ids):
+            raise HTTPException(400, "请选择有效的上游账号")
+        tokens = list(dict.fromkeys(token for key in ids for token in token_groups[key]))
+        progress = await upstream_admin_request("POST", "/api/accounts/refresh", {"access_tokens": tokens})
+        progress_id = str(progress.get("progress_id") or "")
+        if not re.fullmatch(r"[A-Za-z0-9-]{1,80}", progress_id):
+            raise HTTPException(502, "上游未返回刷新任务编号")
+        return {"progress_id": progress_id}
+
+    @app.get("/api/admin/upstream/refresh/{progress_id}")
+    async def upstream_refresh_progress(progress_id: str, user=Depends(admin_user)):
+        if not re.fullmatch(r"[A-Za-z0-9-]{1,80}", progress_id):
+            raise HTTPException(400, "刷新任务编号无效")
+        progress = await upstream_admin_request("GET", f"/api/accounts/refresh/progress/{progress_id}")
+        return {key: progress.get(key) for key in ("total", "processed", "done", "status_counts", "total_quota")} | {
+            "error_count": len((progress.get("result") or {}).get("errors") or []),
+            "error": "上游刷新任务未完成，请重试" if progress.get("error") else None}
+
+    @app.get("/api/admin/overview")
+    def admin_overview(user=Depends(admin_user)):
+        start = datetime.now(timezone(timedelta(hours=8))).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).isoformat()
+        with database_connection(database_path) as db:
+            customers = dict(db.execute("SELECT COUNT(*) AS users, COALESCE(SUM(credits), 0) AS credits FROM users WHERE is_admin = 0").fetchone())
+            jobs = dict(db.execute("SELECT COUNT(*) AS generated, COALESCE(SUM(created_at >= ?), 0) AS generated_today FROM generation_jobs WHERE status = 'succeeded'", (start,)).fetchone())
+            pending = db.execute("SELECT COUNT(*) FROM generation_jobs WHERE status = 'pending'").fetchone()[0]
+            codes = dict(db.execute("SELECT COUNT(*) AS total, COALESCE(SUM(redeemed_by IS NOT NULL), 0) AS redeemed FROM redemption_codes").fetchone())
+            recent = db.execute("SELECT j.id, j.status, j.created_at, u.username FROM generation_jobs j JOIN users u ON u.id = j.user_id ORDER BY j.created_at DESC LIMIT 10").fetchall()
+        return {"customers": customers, "jobs": {**jobs, "pending": pending}, "codes": codes, "recent_jobs": [dict(row) for row in recent]}
 
     @app.get("/api/wallet")
     def wallet(user=Depends(current_user)):

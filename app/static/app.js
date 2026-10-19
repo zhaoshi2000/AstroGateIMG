@@ -33,7 +33,7 @@ function date(value) { try { return new Intl.DateTimeFormat('zh-CN', { month: '2
 function imageSource(value) { return typeof value === 'string' && (/^\/api\/images\/files\/[0-9a-f]{24}$/.test(value) || /^https?:\/\//.test(value) || /^data:image\/(png|jpeg|webp);base64,/.test(value)) ? value : ''; }
 function setBalance(balance) { if (state.user) state.user.credits = balance; $('#top-credits').textContent = balance; $('#wallet-balance').textContent = balance; }
 async function refreshUser() { const data = await api('/api/auth/me'); state.user = data.user; setBalance(data.user.credits); }
-function authDestination() { const next = new URLSearchParams(location.search).get('next'); return /^\/\?post=[a-z0-9-]+$/.test(next || '') ? next : '/studio'; }
+function authDestination() { const next = new URLSearchParams(location.search).get('next'); return /^\/\?post=[a-z0-9-]+$/.test(next || '') ? next : state.user?.is_admin ? '/admin' : '/studio'; }
 
 function authMode(mode) {
   state.mode = mode;
@@ -66,7 +66,7 @@ $('#auth-form').addEventListener('submit', async (event) => {
     const body = state.mode === 'register'
       ? { email: identifier, code: $('#email-code').value.trim(), password: $('#password').value }
       : { identifier, password: $('#password').value };
-    await api(`/api/auth/${state.mode}`, { method: 'POST', body: JSON.stringify(body) });
+    const result = await api(`/api/auth/${state.mode}`, { method: 'POST', body: JSON.stringify(body) }); state.user = result.user;
     location.assign(authDestination());
   } catch (error) { toast(error.message, true); } finally { button.disabled = false; }
 });
@@ -236,46 +236,17 @@ $('#redeem-form').addEventListener('submit', async (event) => {
   catch (error) { toast(error.message, true); } finally { button.disabled = false; }
 });
 
-async function loadUsers() {
-  const data = await api(`/api/admin/users?q=${encodeURIComponent($('#user-search').value)}`);
-  $('#admin-user-count').textContent = data.stats.users; $('#admin-credit-count').textContent = data.stats.credits;
-  $('#admin-users-table').replaceChildren(...data.items.map((user) => {
-    const tr = document.createElement('tr'); const action = document.createElement('td');
-    const form = document.createElement('form'); form.className = 'credit-adjust-form';
-    const input = document.createElement('input'); input.type = 'number'; input.placeholder = '+100 / -10'; input.min = -1000000; input.max = 1000000; input.required = true; input.setAttribute('aria-label', `${user.username} 积分调整`);
-    const button = document.createElement('button'); button.type = 'submit'; button.className = 'button small secondary'; button.textContent = '调整';
-    form.append(input, button); action.append(form);
-    form.addEventListener('submit', async (event) => {
-      event.preventDefault(); button.disabled = true;
-      try { await api(`/api/admin/users/${user.id}/credits`, { method: 'POST', body: JSON.stringify({ amount: Number(input.value), reason: '管理员手动调整' }) }); await loadUsers(); await refreshUser(); toast('积分已调整并记录流水'); }
-      catch (error) { toast(error.message, true); } finally { button.disabled = false; }
-    });
-    tr.append(cell(user.username + (user.is_admin ? ' · 管理员' : '')), cell(date(user.created_at)), cell(user.credits), action); return tr;
-  }));
-}
-async function loadCodes() {
-  const data = await api('/api/admin/codes');
-  $('#admin-codes-table').replaceChildren(...data.items.map((item) => { const tr = document.createElement('tr'); const status = item.redeemed_username ? `已兑换 · ${item.redeemed_username}` : new Date(item.expires_at) < new Date() ? '已过期' : '未使用'; tr.append(cell(`…${item.suffix}`), cell(item.credits), cell(status)); return tr; }));
-}
-$('#user-search-form').addEventListener('submit', (event) => { event.preventDefault(); loadUsers().catch((error) => toast(error.message, true)); });
-$('#code-create-form').addEventListener('submit', async (event) => {
-  event.preventDefault(); const button = event.target.querySelector('button'); button.disabled = true;
-  try { const data = await api('/api/admin/codes', { method: 'POST', body: JSON.stringify({ credits: Number($('#code-credits').value), count: Number($('#code-count').value), expires_days: Number($('#code-days').value) }) }); $('#new-code-text').value = data.codes.join('\n'); $('#new-codes').classList.remove('is-hidden'); await loadCodes(); toast('兑换码已生成，请及时复制保存'); }
-  catch (error) { toast(error.message, true); } finally { button.disabled = false; }
-});
-$('#copy-codes').addEventListener('click', async () => { try { await navigator.clipboard.writeText($('#new-code-text').value); toast('兑换码已复制'); } catch { $('#new-code-text').focus(); $('#new-code-text').select(); toast('请按 Ctrl + C 复制选中的兑换码'); } });
 $('#logout-button').addEventListener('click', async () => { if (state.busy) return toast('请等待生成结束后再退出'); try { await api('/api/auth/logout', { method: 'POST' }); clearReferences(); location.assign('/login'); } catch (error) { toast(error.message, true); } });
 
 (async function initialize() {
   try {
     const data = await api('/api/auth/me'); state.user = data.user;
     if (['/login', '/register'].includes(location.pathname)) return location.replace(authDestination());
-    if (location.pathname === '/admin' && !state.user.is_admin) return location.replace('/studio');
     const displayName = state.user.display_name || state.user.username;
     $('#user-name').textContent = displayName; $('#user-avatar').textContent = displayName[0].toUpperCase(); setBalance(state.user.credits);
     $('#admin-link').classList.toggle('is-hidden', !state.user.is_admin);
-    const route = location.pathname === '/wallet' ? 'wallet' : location.pathname === '/admin' ? 'admin' : 'studio';
-    ['studio', 'wallet', 'admin'].forEach((name) => $(`#${name}-panel`).classList.toggle('is-hidden', name !== route));
+    const route = location.pathname === '/wallet' ? 'wallet' : 'studio';
+    ['studio', 'wallet'].forEach((name) => $(`#${name}-panel`).classList.toggle('is-hidden', name !== route));
     document.querySelector(`[data-route="${route}"]`).classList.add('active');
     $('#app-view').classList.remove('is-hidden'); $('#loading-view').classList.add('is-hidden');
     if (route === 'studio') {
@@ -293,7 +264,6 @@ $('#logout-button').addEventListener('click', async () => { if (state.busy) retu
       if (location.hash === '#history') $('#history').scrollIntoView();
     }
     if (route === 'wallet') await loadWallet();
-    if (route === 'admin') await Promise.all([loadUsers(), loadCodes()]);
   } catch (error) {
     if (error.status === 401) { $('#loading-view').classList.add('is-hidden'); $('#auth-view').classList.remove('is-hidden'); authMode(location.pathname === '/register' ? 'register' : 'login'); }
     else { $('#loading-view span').textContent = '暂时无法加载，请刷新页面重试。'; toast(error.message, true); }
