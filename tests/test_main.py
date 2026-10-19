@@ -1,6 +1,7 @@
 import asyncio
 import base64
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -182,6 +183,18 @@ class AstroGateTests(unittest.TestCase):
                 db.execute("UPDATE email_verifications SET expires_at = '2020-01-01T00:00:00+00:00' WHERE email = ?", (email,))
             self.assertEqual(client.post('/api/auth/register', json={'email': email, 'password': PASSWORD, 'code': '222222'}).status_code, 400)
 
+    def test_email_cooldown_returns_actual_remaining_seconds(self):
+        email = 'countdown@example.com'
+        with TestClient(self.app()) as client:
+            self.assertEqual(client.post('/api/auth/email-code', json={'email': email}).status_code, 200)
+            requested_at = (datetime.now(timezone.utc) - timedelta(seconds=23)).isoformat()
+            with database_connection(Path(self.directory.name) / 'astrogate.db') as db:
+                db.execute('UPDATE email_verifications SET requested_at = ? WHERE email = ?', (requested_at, email))
+            response = client.post('/api/auth/email-code', json={'email': email})
+            self.assertEqual(response.status_code, 429)
+            self.assertIn(int(response.headers['Retry-After']), (36, 37))
+            self.assertNotIn('已发送', response.json()['detail'])
+
     def test_email_is_case_insensitive_and_duplicate_registration_is_blocked(self):
         with TestClient(self.app()) as client:
             self.register(client)
@@ -207,6 +220,7 @@ class AstroGateTests(unittest.TestCase):
         with TestClient(create_app(settings)) as client:
             response = client.post('/api/auth/email-code', json={'email': 'mailfailure@example.com'})
             self.assertEqual(response.status_code, 502)
+            self.assertTrue(0 < int(response.headers['Retry-After']) <= 60)
             self.assertNotIn('private-smtp-password-detail', response.text)
             self.assertEqual(client.post('/api/auth/email-code', json={'email': 'mailfailure@example.com'}).status_code, 429)
 

@@ -45,6 +45,10 @@ ASTROGATE_SMTP_SENDER=noreply@astrogate.sbs
 
 注册需要能发信的 SMTP 服务。当前生产环境使用同机 Postfix（127.0.0.1:25）发送 `noreply@astrogate.sbs` 的验证码邮件。使用其他邮箱供应商时填写 `ASTROGATE_SMTP_USERNAME`、`ASTROGATE_SMTP_PASSWORD`，并按供应商要求选择 `starttls`（一般 587）或 `ssl`（一般 465）。HMAC 密钥可通过 `ASTROGATE_EMAIL_CODE_SECRET` 设置，留空时自动生成到数据目录并持久保存。
 
+同机 Postfix 需要在 `smtpd_relay_restrictions` 和 `smtpd_recipient_restrictions` 中允许 `permit_mynetworks`，且放在 `reject_unauth_destination` 前面；`mynetworks` 保持为本机回环地址。部署后需要向外部邮箱实际投递验证，本域邮箱投递成功不能证明外部投递可用。
+
+验证码按钮显示剩余重发秒数，刷新页面或切换邮箱后仍保留对应邮箱的倒计时。发送受限或发送失败时，页面按服务器返回的 `Retry-After` 更新等待时间。
+
 ```powershell
 .\run.ps1
 ```
@@ -93,6 +97,7 @@ docker compose up -d --build
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 node --check app/static/app.js
 node tests/clipboard.test.cjs
+node tests/email-code.test.cjs
 ```
 
 测试覆盖邮箱验证码注册、过期及错误次数、重发失效、邮箱大小写、已有账号兼容、零余额拦截、多图转发、扣费与幂等、失败退款、并发防透支、兑换码一次性、管理员权限、用户作品隔离和中断任务退款。

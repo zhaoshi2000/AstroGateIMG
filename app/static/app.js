@@ -6,7 +6,7 @@ const ideas = {
   abstract: '漂浮的紫色玻璃球体与金属圆环，柔和光线，浅薰衣草色背景，抽象艺术，精致的材质细节。',
 };
 
-class ApiError extends Error { constructor(message, status) { super(message); this.status = status; } }
+class ApiError extends Error { constructor(message, status, retryAfter = 0) { super(message); this.status = status; this.retryAfter = retryAfter; } }
 async function api(path, options = {}) {
   const response = await fetch(path, { credentials: 'same-origin', ...options, headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...options.headers } });
   let payload;
@@ -15,7 +15,7 @@ async function api(path, options = {}) {
     let detail = payload.detail || payload.error || '请求未完成';
     if (Array.isArray(detail)) detail = detail.map((item) => String(item.msg || '')).join('；').replaceAll('Value error, ', '');
     if (typeof detail !== 'string') detail = detail.message || '请求未完成';
-    throw new ApiError(detail, response.status);
+    throw new ApiError(detail, response.status, Math.max(0, Number(response.headers?.get('Retry-After')) || 0));
   }
   return payload;
 }
@@ -54,6 +54,7 @@ function authMode(mode) {
   $('#email-code').required = registering;
   $('#email-code').disabled = !registering;
   $('#auth-subtitle').textContent = registering ? '验证邮箱后，开启你的图像创作。' : '使用邮箱和密码，继续你的创作。';
+  if (registering) restoreCodeCountdown();
 }
 $('#login-tab').addEventListener('click', () => authMode('login'));
 $('#register-tab').addEventListener('click', () => authMode('register'));
@@ -72,32 +73,58 @@ $('#auth-form').addEventListener('submit', async (event) => {
 let codeCountdown;
 let codeReadyAt = 0;
 let codeEmail = '';
+let codeSending = false;
+const codeStoragePrefix = 'astrogate.email-code-ready-at:';
 function updateCodeButton() {
   const remaining = Math.max(0, Math.ceil((codeReadyAt - Date.now()) / 1000));
-  $('#send-email-code').disabled = remaining > 0;
-  $('#send-email-code').textContent = remaining ? `${remaining} 秒后重发` : '获取验证码';
+  $('#send-email-code').disabled = codeSending || remaining > 0;
+  $('#send-email-code').textContent = codeSending ? '正在发送…' : remaining ? `${remaining} 秒后重发` : '获取验证码';
   if (!remaining) clearInterval(codeCountdown);
+}
+function restartCodeCountdown() {
+  clearInterval(codeCountdown);
+  updateCodeButton();
+  if (codeReadyAt > Date.now()) codeCountdown = setInterval(updateCodeButton, 1000);
+}
+function restoreCodeCountdown() {
+  const email = $('#username').value.trim().toLowerCase();
+  if (email !== codeEmail) codeReadyAt = 0;
+  codeEmail = email;
+  try { codeReadyAt = Math.max(codeReadyAt, Number(localStorage.getItem(codeStoragePrefix + email)) || 0); } catch {}
+  restartCodeCountdown();
+}
+function startCodeCountdown(email, seconds) {
+  codeEmail = email;
+  codeReadyAt = Date.now() + seconds * 1000;
+  try { localStorage.setItem(codeStoragePrefix + email, String(codeReadyAt)); } catch {}
+  restartCodeCountdown();
 }
 $('#username').addEventListener('input', () => {
   if ($('#username').value.trim().toLowerCase() !== codeEmail) {
-    clearInterval(codeCountdown); codeReadyAt = 0; updateCodeButton();
     $('#email-code').value = '';
     $('#email-code-hint').textContent = '验证码 10 分钟内有效。';
   }
+  restoreCodeCountdown();
 });
+$('#username').addEventListener('change', restoreCodeCountdown);
+window.addEventListener('pageshow', restoreCodeCountdown);
+window.addEventListener('storage', (event) => { if (event.key?.startsWith(codeStoragePrefix)) restoreCodeCountdown(); });
 $('#send-email-code').addEventListener('click', async () => {
+  if (codeSending || codeReadyAt > Date.now()) return;
   if (!$('#username').reportValidity()) return;
-  const button = $('#send-email-code'); button.disabled = true; button.textContent = '正在发送…';
+  const email = $('#username').value.trim().toLowerCase();
+  codeSending = true; updateCodeButton();
   $('#username').disabled = true;
   try {
-    const email = $('#username').value.trim().toLowerCase();
     const result = await api('/api/auth/email-code', { method: 'POST', body: JSON.stringify({ email }) });
-    codeEmail = email; codeReadyAt = Date.now() + result.resend_after * 1000;
-    clearInterval(codeCountdown); codeCountdown = setInterval(updateCodeButton, 1000); updateCodeButton();
+    startCodeCountdown(email, result.resend_after);
     $('#email-code-hint').textContent = '验证码已发送，请查收邮箱，也可以检查垃圾邮件。';
     $('#email-code').focus(); toast('验证码已发送，10 分钟内有效');
-  } catch (error) { button.disabled = false; button.textContent = '获取验证码'; toast(error.message, true); }
-  finally { $('#username').disabled = false; }
+  } catch (error) {
+    if (error.retryAfter > 0) startCodeCountdown(email, error.retryAfter);
+    $('#email-code-hint').textContent = error.message;
+    toast(error.message, true);
+  } finally { codeSending = false; $('#username').disabled = false; updateCodeButton(); }
 });
 
 function renderReferences() {

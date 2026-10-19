@@ -24,9 +24,9 @@ async function main() {
     querySelectorAll: () => [], createElement: () => new Element(),
     addEventListener: (name, callback) => { documentEvents[name] = callback; },
   };
-  const context = vm.createContext({ document, location: { pathname: '/studio', search: '', hash: '' },
+  const context = vm.createContext({ document, window: { addEventListener: () => {} }, location: { pathname: '/studio', search: '', hash: '' },
     URL, URLSearchParams, crypto: webcrypto, File, navigator: {}, Intl, console,
-    setTimeout: () => 0, clearTimeout: () => {}, confirm: () => true,
+    setTimeout: () => 0, clearTimeout: () => {}, setInterval: () => 0, clearInterval: () => {}, confirm: () => true,
     fetch: async (url) => ({ ok: true, status: 200, json: async () => url === '/api/auth/me' ? { user: { username: 'artist', credits: 2, is_admin: false } } : { items: [] } }),
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../app/static/app.js'), 'utf8'), context);

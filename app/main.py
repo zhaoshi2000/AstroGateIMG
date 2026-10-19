@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -365,7 +366,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             while queue and queue[0] < now - period:
                 queue.popleft()
             if len(queue) >= limit:
-                raise HTTPException(429, "操作过于频繁，请稍后再试")
+                retry_after = max(1, math.ceil(queue[0] + period - now))
+                raise HTTPException(429, "操作过于频繁，请稍后再试", headers={"Retry-After": str(retry_after)})
             queue.append(now)
 
     def current_user(session_token: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None):
@@ -427,12 +429,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if db.execute("SELECT id FROM users WHERE email = ? OR username = ?", (body.email, body.email)).fetchone():
                 raise HTTPException(409, "该邮箱已注册，请直接登录")
             existing = db.execute("SELECT requested_at FROM email_verifications WHERE email = ?", (body.email,)).fetchone()
-            if existing and (now - datetime.fromisoformat(existing["requested_at"])).total_seconds() < 60:
-                raise HTTPException(429, "验证码已发送，请 60 秒后再试")
+            resend_after = max(0, math.ceil(60 - (now - datetime.fromisoformat(existing["requested_at"])).total_seconds())) if existing else 0
+            if resend_after:
+                raise HTTPException(429, f"请 {resend_after} 秒后重新获取验证码", headers={"Retry-After": str(resend_after)})
             cutoff = (now - timedelta(hours=1)).isoformat()
-            recent = db.execute("SELECT COUNT(*) FROM email_verification_sends WHERE email = ? AND requested_at >= ?", (body.email, cutoff)).fetchone()[0]
-            if recent >= 5:
-                raise HTTPException(429, "该邮箱发送次数过多，请稍后再试")
+            recent = db.execute("SELECT COUNT(*) AS total, MIN(requested_at) AS first_sent_at FROM email_verification_sends WHERE email = ? AND requested_at >= ?", (body.email, cutoff)).fetchone()
+            if recent["total"] >= 5:
+                retry_after = max(1, math.ceil(3600 - (now - datetime.fromisoformat(recent["first_sent_at"])).total_seconds()))
+                raise HTTPException(429, "该邮箱发送次数过多，请稍后再试", headers={"Retry-After": str(retry_after)})
             db.execute("INSERT INTO email_verifications (email, code_hash, expires_at, requested_at, attempts) VALUES (?, ?, ?, ?, 0) ON CONFLICT(email) DO UPDATE SET code_hash = excluded.code_hash, expires_at = excluded.expires_at, requested_at = excluded.requested_at, attempts = 0",
                        (body.email, code_digest(body.email, code), (now + timedelta(minutes=10)).isoformat(), now.isoformat()))
             db.execute("INSERT INTO email_verification_sends (email, requested_at) VALUES (?, ?)", (body.email, now.isoformat()))
@@ -445,8 +449,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception as exc:
             # SMTP may have accepted DATA before a connection fails. Keep the code
             # valid so a message that did arrive can still be used.
-            raise HTTPException(502, "邮件暂时未能发送，请稍后重试；若已收到邮件，可继续使用验证码") from exc
-        return {"ok": True, "expires_in": 600, "resend_after": 60}
+            retry_after = max(0, math.ceil(60 - (datetime.now(timezone.utc) - now).total_seconds()))
+            raise HTTPException(502, "邮件暂时未能发送，请稍后重试；若已收到邮件，可继续使用验证码", headers={"Retry-After": str(retry_after)}) from exc
+        elapsed = (datetime.now(timezone.utc) - now).total_seconds()
+        return {"ok": True, "expires_in": max(0, math.ceil(600 - elapsed)), "resend_after": max(0, math.ceil(60 - elapsed))}
 
     @app.post("/api/auth/register", status_code=201)
     def register(body: EmailRegistrationRequest, response: Response, request: Request):
