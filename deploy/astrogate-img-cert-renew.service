@@ -1,0 +1,10 @@
+[Unit]
+Description=Renew AstroGate IMG HTTPS certificate
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/docker run --rm --network host -v /etc/letsencrypt:/etc/letsencrypt -v /var/www/astrogate-img:/var/www/astrogate-img certbot/certbot renew --cert-name img.astrogate.sbs --quiet
+ExecStartPost=/usr/sbin/nginx -t
+ExecStartPost=/usr/bin/systemctl reload nginx

@@ -1,6 +1,6 @@
-from __future__ import annotations
-
+import asyncio
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -9,99 +9,140 @@ import unittest
 import httpx
 from fastapi.testclient import TestClient
 
-from app.main import Settings, create_app
+from app.main import Settings, create_app, database_connection
+
+PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9WlYb4wAAAAASUVORK5CYII='
+REFERENCE = 'data:image/png;base64,' + PNG
+PASSWORD = 'secure-password-42'
 
 
-TEST_PNG = base64.b64encode(b"\x89PNG\r\n\x1a\nimage-bytes").decode("ascii")
+class AstroGateTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.calls = []
 
+    def app(self, credits=0, handler=None):
+        def upstream(request):
+            self.calls.append(json.loads(request.content))
+            return httpx.Response(200, json={'data': [{'b64_json': PNG}]})
+        return create_app(Settings(Path(self.directory.name), 'https://upstream.example', 'secret', False,
+                                   httpx.MockTransport(handler or upstream), 'operator', PASSWORD, credits))
 
-class AstroGateImageTests(unittest.TestCase):
-    def test_registration_login_and_personal_history(self) -> None:
-        with TemporaryDirectory() as temporary_directory:
-            settings = Settings(
-                data_dir=Path(temporary_directory),
-                upstream_url="",
-                upstream_api_key="",
-                cookie_secure=False,
-            )
-            with TestClient(create_app(settings)) as client:
-                credentials = {"username": "creative_user", "password": "secure-password-42"}
-                registration = client.post("/api/auth/register", json=credentials)
-                self.assertEqual(registration.status_code, 201)
-                self.assertEqual(registration.json()["user"]["username"], "creative_user")
+    def register(self, client, name='artist'):
+        response = client.post('/api/auth/register', json={'username': name, 'password': PASSWORD})
+        self.assertEqual(response.status_code, 201)
+        return response.json()['user']
 
-                self.assertEqual(client.get("/api/auth/me").status_code, 200)
-                self.assertEqual(client.get("/api/images/history").json()["items"], [])
-                self.assertEqual(client.post("/api/images/generations", json={"prompt": "test"}).status_code, 503)
-                self.assertEqual(client.post("/api/auth/register", json=credentials).status_code, 409)
+    def login(self, client, name='artist'):
+        response = client.post('/api/auth/login', json={'username': name, 'password': PASSWORD})
+        self.assertEqual(response.status_code, 200)
 
-                self.assertEqual(client.post("/api/auth/logout").status_code, 200)
-                self.assertEqual(client.get("/api/auth/me").status_code, 401)
-                self.assertEqual(client.post("/api/auth/login", json=credentials).status_code, 200)
-                self.assertEqual(client.get("/api/auth/me").json()["user"]["username"], "creative_user")
+    def test_auth_registration_starts_with_zero_credits(self):
+        with TestClient(self.app()) as client:
+            user = self.register(client)
+            self.assertEqual(user['credits'], 0)
+            self.assertFalse(user['is_admin'])
+            self.assertEqual(client.get('/api/auth/me').status_code, 200)
+            self.assertEqual(client.get('/api/admin/users').status_code, 403)
+            self.assertEqual(client.post('/api/images/generations', json={'prompt': 'blue circle'}).status_code, 402)
+            self.assertEqual(len(self.calls), 0)
+            client.post('/api/auth/logout')
+            self.assertEqual(client.get('/api/auth/me').status_code, 401)
+            self.login(client)
+            self.assertEqual(client.get('/api/auth/me').json()['user']['username'], 'artist')
 
-    def test_registration_validation(self) -> None:
-        with TemporaryDirectory() as temporary_directory:
-            settings = Settings(Path(temporary_directory), "", "", False)
-            with TestClient(create_app(settings)) as client:
-                response = client.post("/api/auth/register", json={"username": "x", "password": "short"})
-                self.assertEqual(response.status_code, 422)
+    def test_multi_reference_generation_cost_and_idempotency(self):
+        with TestClient(self.app(3)) as client:
+            self.register(client)
+            payload = {'prompt': 'Use the subject of image 1 and colors of image 2', 'image_data_urls': [REFERENCE, REFERENCE]}
+            response = client.post('/api/images/edits', json=payload, headers={'Idempotency-Key': 'same-request'})
+            self.assertEqual(response.status_code, 200, response.text)
+            data = response.json()
+            self.assertEqual(data['credits'], 2)
+            self.assertEqual(data['item']['reference_count'], 2)
+            self.assertEqual(data['item']['credits_cost'], 1)
+            self.assertEqual(len(self.calls[0]['images']), 2)
+            self.assertEqual(client.get(data['item']['image_src']).content, base64.b64decode(PNG))
+            again = client.post('/api/images/edits', json=payload, headers={'Idempotency-Key': 'same-request'})
+            self.assertEqual(again.json()['credits'], 2)
+            self.assertEqual(len(self.calls), 1)
+            history = client.get('/api/images/history').json()['items']
+            self.assertEqual(len(history), 1)
+            self.assertEqual(history[0]['mode'], 'image-to-image')
 
-    def test_successful_generation_is_saved_for_the_current_user(self) -> None:
-        def upstream_handler(request: httpx.Request) -> httpx.Response:
-            self.assertEqual(request.url.path, "/v1/images/generations")
-            self.assertEqual(request.headers["authorization"], "Bearer upstream-key")
-            self.assertEqual(json.loads(request.content)["prompt"], "a glowing observatory")
-            return httpx.Response(200, json={"data": [{"b64_json": "aGVsbG8="}]})
+    def test_failed_generation_refunds_credits(self):
+        def fail(request):
+            return httpx.Response(429, json={'error': {'message': 'no available image quota'}})
+        with TestClient(self.app(1, fail)) as client:
+            self.register(client)
+            response = client.post('/api/images/generations', json={'prompt': 'blue circle'})
+            self.assertEqual(response.status_code, 429)
+            wallet = client.get('/api/wallet').json()
+            self.assertEqual(wallet['credits'], 1)
+            self.assertEqual([item['amount'] for item in wallet['ledger'][:2]], [1, -1])
+            self.assertEqual(client.get('/api/images/history').json()['items'], [])
 
-        with TemporaryDirectory() as temporary_directory:
-            settings = Settings(
-                data_dir=Path(temporary_directory),
-                upstream_url="https://upstream.example",
-                upstream_api_key="upstream-key",
-                cookie_secure=False,
-                upstream_transport=httpx.MockTransport(upstream_handler),
-            )
-            with TestClient(create_app(settings)) as client:
-                client.post("/api/auth/register", json={"username": "artist_1", "password": "secure-password-42"})
-                response = client.post("/api/images/generations", json={"prompt": "a glowing observatory"})
-                self.assertEqual(response.status_code, 200)
-                self.assertTrue(response.json()["item"]["image_src"].startswith("data:image/png;base64,"))
-                history = client.get("/api/images/history").json()["items"]
-                self.assertEqual(len(history), 1)
-                self.assertEqual(history[0]["prompt"], "a glowing observatory")
-
-    def test_image_edit_forwards_reference_image_and_saves_mode(self) -> None:
-        def upstream_handler(request: httpx.Request) -> httpx.Response:
-            self.assertEqual(request.url.path, "/v1/images/edits")
-            payload = json.loads(request.content)
-            self.assertEqual(payload["prompt"], "make it sunset")
-            self.assertEqual(payload["images"][0]["b64_json"], TEST_PNG)
-            return httpx.Response(200, json={"data": [{"b64_json": "cmVzdWx0"}]})
-
-        with TemporaryDirectory() as temporary_directory:
-            settings = Settings(Path(temporary_directory), "https://upstream.example", "upstream-key", False, httpx.MockTransport(upstream_handler))
-            with TestClient(create_app(settings)) as client:
-                client.post("/api/auth/register", json={"username": "artist_edit", "password": "secure-password-42"})
-                response = client.post("/api/images/edits", json={
-                    "prompt": "make it sunset",
-                    "image_data_url": f"data:image/png;base64,{TEST_PNG}",
-                })
-                self.assertEqual(response.status_code, 200)
-                self.assertEqual(response.json()["item"]["mode"], "image-to-image")
-                self.assertEqual(client.get("/api/images/history").json()["items"][0]["mode"], "image-to-image")
-
-    def test_image_edit_rejects_invalid_reference_image(self) -> None:
-        with TemporaryDirectory() as temporary_directory:
-            settings = Settings(Path(temporary_directory), "https://upstream.example", "upstream-key", False)
-            with TestClient(create_app(settings)) as client:
-                client.post("/api/auth/register", json={"username": "artist_bad_image", "password": "secure-password-42"})
-                response = client.post("/api/images/edits", json={
-                    "prompt": "make it sunset", "image_data_url": "data:image/png;base64,aGVsbG8=",
-                })
+    def test_invalid_reference_does_not_charge(self):
+        with TestClient(self.app(2)) as client:
+            self.register(client)
+            for image in ['data:image/png;base64,invalid*', 'data:image/svg+xml;base64,PHN2Zz4=', 'data:image/png;base64,aGVsbG8=']:
+                response = client.post('/api/images/edits', json={'prompt': 'edit it', 'image_data_urls': [image]})
                 self.assertEqual(response.status_code, 400)
-                self.assertEqual(client.get("/api/images/history").json()["items"], [])
+            self.assertEqual(client.get('/api/wallet').json()['credits'], 2)
+            self.assertEqual(len(self.calls), 0)
+
+    def test_codes_can_only_be_redeemed_once_and_admin_can_adjust(self):
+        with TestClient(self.app()) as client:
+            user = self.register(client)
+            self.login(client, 'operator')
+            codes = client.post('/api/admin/codes', json={'credits': 100, 'count': 2}).json()['codes']
+            self.assertEqual(len(codes), 2)
+            adjustment = client.post(f"/api/admin/users/{user['id']}/credits", json={'amount': 5, 'reason': 'test top-up'})
+            self.assertEqual(adjustment.json()['credits'], 5)
+            self.login(client)
+            self.assertEqual(client.post('/api/wallet/redeem', json={'code': codes[0].lower()}).json()['credits'], 105)
+            self.assertEqual(client.post('/api/wallet/redeem', json={'code': codes[0]}).status_code, 400)
+            self.assertEqual(client.get('/api/wallet').json()['credits'], 105)
+
+    def test_other_users_cannot_view_or_delete_images(self):
+        with TestClient(self.app(1)) as client:
+            self.register(client)
+            item = client.post('/api/images/generations', json={'prompt': 'blue circle'}).json()['item']
+            client.post('/api/auth/logout')
+            self.register(client, 'other_artist')
+            self.assertEqual(client.get(item['image_src']).status_code, 404)
+            self.assertEqual(client.delete('/api/images/history/' + item['id']).status_code, 404)
+            self.assertEqual(client.get('/api/images/history').json()['items'], [])
+
+    def test_concurrent_requests_cannot_overdraw_balance(self):
+        async def slow(request):
+            await asyncio.sleep(0.2)
+            return httpx.Response(200, json={'data': [{'b64_json': PNG}]})
+        with TestClient(self.app(1, slow)) as client:
+            self.register(client)
+            with ThreadPoolExecutor(2) as pool:
+                statuses = list(pool.map(lambda _: client.post('/api/images/generations', json={'prompt': 'a circle'}).status_code, range(2)))
+            self.assertEqual(sorted(statuses), [200, 402])
+            self.assertEqual(client.get('/api/wallet').json()['credits'], 0)
+            self.assertEqual(len(client.get('/api/images/history').json()['items']), 1)
+
+    def test_restart_refunds_interrupted_reservation_once(self):
+        with TestClient(self.app()) as client:
+            user = self.register(client)
+        with database_connection(Path(self.directory.name) / 'astrogate.db') as db:
+            db.execute("INSERT INTO generation_jobs (id, user_id, request_key, fingerprint, status, created_at) VALUES ('interrupted', ?, 'key', 'fingerprint', 'pending', '2026-10-19')", (user['id'],))
+        for _ in range(2):
+            with TestClient(self.app()) as client:
+                self.login(client)
+                self.assertEqual(client.get('/api/wallet').json()['credits'], 1)
+
+    def test_homepage_and_studio_exist(self):
+        with TestClient(self.app()) as client:
+            self.assertIn('0.05', client.get('/').text)
+            self.assertIn('reference-image', client.get('/studio').text)
+            self.assertEqual(client.get('/assets/mark.svg').status_code, 200)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     unittest.main()

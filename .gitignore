@@ -4,3 +4,6 @@ __pycache__/
 *.py[cod]
 data/
 .pytest_cache/
+.deploy/
+.env.*
+!.env.example

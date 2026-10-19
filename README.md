@@ -1,18 +1,21 @@
 # AstroGate IMG
 
-AstroGate IMG 是一个可自托管的图像创作客户端。用户注册后拥有独立会话和个人图集；应用通过服务端连接 OpenAI 兼容的图片接口，例如 `chatgpt2api`。
+可自托管的 AI 图片创作平台，包含官网首页、注册登录、文生图、多图参考、个人作品库、积分中心和管理控制台。
 
-## 包含功能
+线上地址：<https://img.astrogate.sbs>
 
-- 账号注册、登录和退出，密码使用 PBKDF2-SHA256 哈希保存。
-- 仅使用 HttpOnly 会话 Cookie，登录状态有效期为 14 天。
-- 图片提示词、模型、画幅和质量选择。
-- 上传 PNG、JPG 或 WebP 参考图，按提示词进行图生图；上传图片最大 50MB。
-- 每位用户独立保存和删除自己的生成记录。
-- 深色创作工作台，适配桌面和手机浏览器。
-- 上游接口地址和密钥仅保存在服务端环境变量中，不会发送给浏览器。
+## 功能
 
-## 快速启动（Windows）
+- 输入提示词生成图片，或通过参考图进行图生图。
+- 点击上传、拖放图片、`Ctrl + V` / `⌘ + V` 粘贴，支持最多 8 张 PNG/JPG/WebP 参考图，合计不超过 50MB。
+- 1 积分生成 1 张图片，标价 ¥0.05 RMB / 张。新用户默认 0 积分，使用兑换码充值。
+- 发起请求时预留积分，成功后完成扣费；失败或服务重启中断时退款。
+- 使用数据库事务防止并发透支，使用请求编号防止同一次生成重复扣费。
+- 积分流水、单次兑换码、管理员加减积分和兑换码管理。
+- 图片通过登录权限校验后访问，每位用户只能查看自己的作品。
+- 密码使用 PBKDF2-SHA256 哈希，会话使用 HttpOnly Cookie。
+
+## 本地启动
 
 ```powershell
 git clone https://github.com/zhaoshi2000/AstroGateIMG.git
@@ -22,40 +25,67 @@ python -m venv .venv
 Copy-Item .env.example .env
 ```
 
-编辑 `.env`，填写图片接口地址和可用的 API 密钥：
+编辑 `.env`，填写上游接口地址、密钥，以及初始化管理员账号：
 
 ```dotenv
 ASTROGATE_UPSTREAM_URL=http://127.0.0.1:21873
 ASTROGATE_UPSTREAM_API_KEY=your-upstream-api-key
+ASTROGATE_ADMIN_USERNAME=your-admin-name
+ASTROGATE_ADMIN_PASSWORD=your-admin-password
+ASTROGATE_COOKIE_SECURE=false
+ASTROGATE_SIGNUP_CREDITS=0
 ```
 
-启动客户端服务：
+管理员账号首次启动时创建；已有账号不会被环境变量重置密码。
 
 ```powershell
 .\run.ps1
 ```
 
-浏览器打开 [http://127.0.0.1:43921](http://127.0.0.1:43921)。默认端口为 `43921`，可用 `./run.ps1 -Port 43922` 修改。
+打开 <http://127.0.0.1:43921>。可通过 `./run.ps1 -Port 43922` 修改本地端口。
 
-## 配置项
+## 主要页面
 
-| 变量 | 说明 |
+| 路径 | 用途 |
 | --- | --- |
-| `ASTROGATE_UPSTREAM_URL` | OpenAI 兼容接口的根地址，例如 `http://127.0.0.1:21873`。 |
-| `ASTROGATE_UPSTREAM_API_KEY` | 上游接口的 API 密钥。 |
-| `ASTROGATE_DATA_DIR` | SQLite 数据目录，默认 `./data`。 |
-| `ASTROGATE_COOKIE_SECURE` | HTTPS 部署时设为 `true`。本地 HTTP 使用 `false`。 |
+| `/` | 官网首页、功能、价格与常见问题 |
+| `/register`、`/login` | 注册和登录 |
+| `/studio` | 图片创作和个人作品库 |
+| `/wallet` | 积分余额、兑换码充值、积分流水 |
+| `/admin` | 管理员用户积分调整和兑换码管理 |
 
-文生图请求转发至 `POST {ASTROGATE_UPSTREAM_URL}/v1/images/generations`，图生图请求转发至 `POST {ASTROGATE_UPSTREAM_URL}/v1/images/edits`。在工作台填写提示词后，可直接生成；添加参考图后则切换为图生图。结果会保存到当前账号的个人图集。
+## 积分运营
 
-## 开发与验证
+管理员登录后打开 `/admin`，在“生成兑换码”中填写单码积分、数量和有效天数。完整兑换码只在创建时返回，请复制保存后交付给用户。用户在 `/wallet` 输入兑换码，积分立即到账。
+
+管理员也可以在用户列表直接加减积分，输入正数增加、负数扣减，调整会写入流水。删除作品不会退还已消耗积分。
+
+## Linux / Docker 部署
+
+准备 `.env`，公网 HTTPS 环境设置 `ASTROGATE_COOKIE_SECURE=true`。创建数据目录并给予容器用户权限：
+
+```sh
+mkdir -p data
+chown 10001:10001 data
+docker compose up -d --build
+```
+
+应用默认仅监听 `127.0.0.1:43921`。使用 nginx 等反向代理提供 HTTPS，图片上传限制至少 75MB、请求超时至少 300 秒。`compose.yml` 使用 Linux host 网络，可以连接同机仅监听回环地址的图片上游。
+
+部署目录中的 `data/astrogate.db` 保存用户、会话、积分、兑换码和流水；`data/images/` 保存生成图片。请为整个 `data/` 目录配置持久化和备份。应用目前必须使用一个 worker；进程启动会退款此前中断的生成任务。
+
+`deploy/configure_ingress.py` 用于当前服务器的 HAProxy + nginx 结构，会备份并校验配置后添加 `img.astrogate.sbs` 的独立路由，不适用于任意服务器配置。
+
+## 上游要求
+
+使用 OpenAI 兼容图片接口：文生图为 `/v1/images/generations`，图生图为 `/v1/images/edits`。图生图使用 JSON `images` 数组（包含 `b64_json`、`filename`、`mime_type`），适配本项目正在使用的 `chatgpt2api`。上游密钥只保留在服务端。
+
+## 验证
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+node --check app/static/app.js
+node tests/clipboard.test.cjs
 ```
 
-测试覆盖注册、重复账号拦截、登录、退出、会话校验、文生图、图生图和参考图格式校验。
-
-## 部署说明
-
-部署到公网时，在 HTTPS 反向代理后运行应用，并设置 `ASTROGATE_COOKIE_SECURE=true`。应用的数据保存在 `ASTROGATE_DATA_DIR` 指定的目录，部署时请为该目录配置持久化存储。
+测试覆盖注册登录、零余额拦截、多图转发、扣费与幂等、失败退款、并发防透支、兑换码一次性、管理员权限、用户作品隔离和中断任务退款。

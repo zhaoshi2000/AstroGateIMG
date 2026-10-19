@@ -1,0 +1,10 @@
+[Unit]
+Description=Check AstroGate IMG certificate twice daily
+
+[Timer]
+OnCalendar=*-*-* 06,18:17:00
+RandomizedDelaySec=3600
+Persistent=true
+
+[Install]
+WantedBy=timers.target
