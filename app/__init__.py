@@ -1,0 +1,1 @@
+"""AstroGate IMG application package."""

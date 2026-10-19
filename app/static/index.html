@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0a0a14" />
+    <title>AstroGate IMG · 创作空间</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+    <main id="auth-view" class="auth-shell">
+      <section class="auth-intro">
+        <a class="brand" href="/" aria-label="AstroGate IMG 首页">
+          <span class="brand-mark"><i></i><i></i><i></i></span>
+          <span>AstroGate <b>IMG</b></span>
+        </a>
+        <div class="auth-copy">
+          <p class="eyebrow">IMAGE STUDIO</p>
+          <h1>把灵感，<br /><em>变成可见的宇宙。</em></h1>
+          <p>一个为图像创作准备的个人工作台。注册后保存你的生成历史，随时继续上一次灵感。</p>
+        </div>
+        <div class="orbit-card">
+          <span class="orbit-dot"></span>
+          <span>你的创作记录，只属于你</span>
+        </div>
+      </section>
+
+      <section class="auth-panel">
+        <div class="auth-panel-inner">
+          <p class="mobile-brand"><span class="brand-mark"><i></i><i></i><i></i></span> AstroGate <b>IMG</b></p>
+          <div class="auth-heading">
+            <p class="eyebrow" id="auth-kicker">WELCOME BACK</p>
+            <h2 id="auth-title">继续创作</h2>
+            <p id="auth-subtitle">登录后访问你的个人图像工作台。</p>
+          </div>
+          <div class="auth-switch" role="tablist" aria-label="登录方式">
+            <button class="active" id="login-tab" type="button" role="tab">登录</button>
+            <button id="register-tab" type="button" role="tab">注册</button>
+          </div>
+          <form id="auth-form" class="stack-form">
+            <label>
+              <span>账号</span>
+              <input id="username" name="username" autocomplete="username" placeholder="3 至 32 位字母、数字或符号" required />
+            </label>
+            <label>
+              <span>密码</span>
+              <input id="password" name="password" type="password" autocomplete="current-password" placeholder="至少 8 位" required minlength="8" />
+            </label>
+            <button class="primary-button auth-submit" type="submit"><span id="auth-submit-text">登录工作台</span><span class="button-arrow">↗</span></button>
+          </form>
+          <p class="auth-footnote" id="auth-footnote">还没有账号？<button type="button" id="switch-to-register">现在注册</button></p>
+        </div>
+      </section>
+    </main>
+
+    <main id="app-view" class="app-shell is-hidden">
+      <header class="topbar">
+        <a class="brand" href="/">
+          <span class="brand-mark"><i></i><i></i><i></i></span>
+          <span>AstroGate <b>IMG</b></span>
+        </a>
+        <div class="topbar-actions">
+          <span id="upstream-status" class="status-pill"><i></i> 正在检查服务</span>
+          <div class="user-menu"><span class="avatar" id="user-avatar">A</span><span id="user-name">创作者</span></div>
+          <button class="quiet-button" id="logout-button" type="button">退出</button>
+        </div>
+      </header>
+
+      <div class="workspace">
+        <aside class="sidebar">
+          <p class="side-label">工作区</p>
+          <a class="side-link active" href="#studio"><span>✦</span> 创作工作台</a>
+          <a class="side-link" href="#history"><span>◫</span> 我的图集</a>
+          <div class="side-bottom">
+            <div class="tip-card"><span>✺</span><p>描述越具体，画面越接近你的想法。</p></div>
+          </div>
+        </aside>
+
+        <section class="content" id="studio">
+          <div class="content-heading">
+            <div><p class="eyebrow">YOUR CREATIVE SPACE</p><h1>今天想看见什么？</h1></div>
+            <p class="date-label" id="today-label"></p>
+          </div>
+
+          <section class="generator-card">
+            <form id="generation-form">
+              <label class="prompt-label" for="prompt">描述你的画面</label>
+              <textarea id="prompt" maxlength="4000" placeholder="例如：暮色里漂浮在云海上方的未来建筑，柔和胶片质感，极简构图" required></textarea>
+              <div class="prompt-tools">
+                <div class="prompt-samples" aria-label="灵感示例">
+                  <button type="button" data-prompt="静谧的月球温室，透明穹顶下生长着发光植物，电影感，深蓝色调">月球温室</button>
+                  <button type="button" data-prompt="一只戴着飞行员护目镜的橘猫，在复古火箭驾驶舱内，细腻插画风格">复古火箭猫</button>
+                  <button type="button" data-prompt="雨后傍晚的城市街角，霓虹灯倒映在湿润路面上，35mm 胶片摄影">雨夜霓虹</button>
+                </div>
+                <span id="prompt-count">0 / 4000</span>
+              </div>
+              <div class="generation-controls">
+                <label class="select-field"><span>模型</span><select id="model"><option value="gpt-image-1">GPT Image 1</option><option value="gpt-image-2">GPT Image 2</option></select></label>
+                <label class="select-field"><span>画幅</span><select id="size"><option value="1024x1024">1:1 方形</option><option value="1024x1536">2:3 竖幅</option><option value="1536x1024">3:2 横幅</option></select></label>
+                <label class="select-field"><span>质量</span><select id="quality"><option value="low">低</option><option value="medium" selected>标准</option><option value="high">高</option></select></label>
+                <button id="generate-button" class="primary-button generate-button" type="submit"><span class="spark">✦</span><span>开始生成</span></button>
+              </div>
+            </form>
+          </section>
+
+          <section class="result-section" aria-live="polite">
+            <div id="generation-empty" class="empty-result">
+              <div class="empty-icon">✦</div><div><strong>作品将在这里出现</strong><p>写下画面描述，开始你的第一张作品。</p></div>
+            </div>
+            <article id="generation-result" class="result-card is-hidden">
+              <div class="result-media"><img id="result-image" alt="刚生成的作品" /><div class="image-shine"></div></div>
+              <div class="result-detail"><p class="eyebrow">JUST CREATED</p><h2>新作品已完成</h2><p id="result-prompt"></p><div class="result-meta" id="result-meta"></div><a id="download-result" class="outline-button" href="#" download="astrogate-image.png">下载作品 <span>↓</span></a></div>
+            </article>
+          </section>
+
+          <section class="history-section" id="history">
+            <div class="section-title"><div><p class="eyebrow">YOUR ARCHIVE</p><h2>我的图集</h2></div><span id="history-count">0 件作品</span></div>
+            <div id="history-grid" class="history-grid"></div>
+            <div id="history-empty" class="history-empty"><span>◌</span><p>你的图集还没有作品</p></div>
+          </section>
+        </section>
+      </div>
+    </main>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/assets/app.js" defer></script>
+  </body>
+</html>
