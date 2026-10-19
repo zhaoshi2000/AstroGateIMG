@@ -16,6 +16,7 @@ class Element {
   append(...children) { this.children.push(...children); }
   replaceChildren(...children) { this.children = children; }
   focus() {}
+  dispatchEvent(event) { this.events[event.type]?.(event); }
 }
 async function main() {
   const elements = new Map(); const documentEvents = {};
@@ -24,13 +25,24 @@ async function main() {
     querySelectorAll: () => [], createElement: () => new Element(),
     addEventListener: (name, callback) => { documentEvents[name] = callback; },
   };
+  const drafts = new Map([['astrogate.community-draft', JSON.stringify({ prompt: 'Showcase prompt carried into the studio', size: '864x1536' })]]);
+  document.querySelector('#size').options = [{ value: '1024x1024' }, { value: '864x1536' }];
   const context = vm.createContext({ document, window: { addEventListener: () => {} }, location: { pathname: '/studio', search: '', hash: '' },
-    URL, URLSearchParams, crypto: webcrypto, File, navigator: {}, Intl, console,
+    URL, URLSearchParams, crypto: webcrypto, File, Event, navigator: {}, Intl, console,
+    sessionStorage: { getItem: (key) => drafts.get(key), removeItem: (key) => drafts.delete(key) },
     setTimeout: () => 0, clearTimeout: () => {}, setInterval: () => 0, clearInterval: () => {}, confirm: () => true,
     fetch: async (url) => ({ ok: true, status: 200, json: async () => url === '/api/auth/me' ? { user: { username: 'artist', credits: 2, is_admin: false } } : { items: [] } }),
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../app/static/app.js'), 'utf8'), context);
   await new Promise(setImmediate);
+  assert.equal(elements.get('#prompt').value, 'Showcase prompt carried into the studio');
+  assert.equal(elements.get('#size').value, '864x1536');
+  assert.equal(drafts.size, 0, 'Applying a showcase draft must consume it once');
+  context.location.search = '?next=' + encodeURIComponent('/?post=sakura-after-school');
+  assert.equal(vm.runInContext('authDestination()', context), '/?post=sakura-after-school');
+  context.location.search = '?next=' + encodeURIComponent('//untrusted.example');
+  assert.equal(vm.runInContext('authDestination()', context), '/studio', 'Login must reject external redirect destinations');
+  context.location.search = '';
   vm.runInContext("authMode('register')", context);
   assert.equal(elements.get('#username').type, 'email', 'Registration must request an email address');
   assert.equal(elements.get('#email-code').required, true, 'Registration must require an email code');

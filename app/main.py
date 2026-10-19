@@ -35,6 +35,8 @@ MAX_IMAGE_BYTES = 50 * 1024 * 1024
 MAX_REFERENCES = 8
 PASSWORD_ITERATIONS = 600_000
 PRICE = {"credits_per_image": 1, "rmb_per_image": "0.05"}
+GALLERY_POSTS = json.loads((ROOT_DIR / "app/gallery_catalog.json").read_text(encoding="utf-8"))
+GALLERY_BY_ID = {post["id"]: post for post in GALLERY_POSTS}
 
 
 def load_local_environment() -> None:
@@ -146,6 +148,21 @@ class ImageEditRequest(ImageGenerationRequest):
     image_data_url: str | None = None  # Compatibility with the first client release.
 
 
+class CommunityLikeRequest(BaseModel):
+    liked: bool
+
+
+class CommunityCommentRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=600)
+
+    @field_validator("content")
+    @classmethod
+    def nonempty_comment(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("请填写评论内容")
+        return value.strip()
+
+
 class RedeemRequest(BaseModel):
     code: str = Field(min_length=8, max_length=120)
 
@@ -251,6 +268,16 @@ def initialize_database(path: Path, settings: Settings) -> None:
             CREATE TABLE IF NOT EXISTS email_verification_sends (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL, requested_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS community_likes (
+                post_id TEXT NOT NULL, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                created_at TEXT NOT NULL, PRIMARY KEY(post_id, user_id)
+            );
+            CREATE TABLE IF NOT EXISTS community_comments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, post_id TEXT NOT NULL,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                content TEXT NOT NULL CHECK(length(content) BETWEEN 1 AND 600), created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS community_comments_by_post ON community_comments(post_id, id DESC);
             CREATE INDEX IF NOT EXISTS verification_sends_by_email ON email_verification_sends(email, requested_at);
             CREATE INDEX IF NOT EXISTS image_history_by_user ON image_history(user_id, created_at DESC);
             CREATE INDEX IF NOT EXISTS sessions_by_expiry ON sessions(expires_at);
@@ -346,7 +373,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             verification_secret = secret_file.read_text().strip()
         yield
 
-    app = FastAPI(title="AstroGate IMG", version="0.3.0", lifespan=lifespan, docs_url=None, redoc_url=None)
+    app = FastAPI(title="AstroGate IMG", version="0.4.0", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
 
     @app.middleware("http")
@@ -389,6 +416,86 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not user["is_admin"]:
             raise HTTPException(403, "需要管理员权限")
         return user
+
+    def optional_user(session_token: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None):
+        try:
+            return current_user(session_token)
+        except HTTPException as exc:
+            if exc.status_code != 401:
+                raise
+            return None
+
+    def gallery_post(post_id: str):
+        if post_id not in GALLERY_BY_ID:
+            raise HTTPException(404, "作品不存在")
+        return GALLERY_BY_ID[post_id]
+
+    def community_comment(row, user):
+        return {"id": row["id"], "author": row["email"].split("@")[0] if row["email"] else row["username"],
+                "content": row["content"], "created_at": row["created_at"], "is_example": False,
+                "can_delete": bool(user and (user["id"] == row["user_id"] or user["is_admin"]))}
+
+    def example_comments(post):
+        return [{"id": f"example-{post['id']}-{index}", "author": comment["author"], "content": comment["content"],
+                 "is_example": True, "can_delete": False, "created_at": None} for index, comment in enumerate(post["comments"])]
+
+    def community_post(post, db, user):
+        item = {key: post[key] for key in ("id", "title", "category", "tags", "author", "prompt", "alt", "width", "height", "size")}
+        item["image"] = f"/assets/gallery/{post['id']}.webp"
+        item["thumbnail"] = f"/assets/gallery/{post['id']}-preview.webp"
+        item["likes_count"] = db.execute("SELECT COUNT(*) FROM community_likes WHERE post_id = ?", (post["id"],)).fetchone()[0]
+        item["liked"] = bool(user and db.execute("SELECT 1 FROM community_likes WHERE post_id = ? AND user_id = ?", (post["id"], user["id"])).fetchone())
+        item["comments_count"] = len(post["comments"]) + db.execute("SELECT COUNT(*) FROM community_comments WHERE post_id = ?", (post["id"],)).fetchone()[0]
+        latest = db.execute("SELECT c.*, u.username, u.email FROM community_comments c JOIN users u ON u.id = c.user_id WHERE c.post_id = ? ORDER BY c.id DESC LIMIT 1", (post["id"],)).fetchone()
+        item["comment_preview"] = community_comment(latest, user) if latest else example_comments(post)[0]
+        item["last_commented_at"] = latest["created_at"] if latest else ""
+        return item
+
+    @app.get("/api/community/posts")
+    def list_community_posts(user=Depends(optional_user)):
+        with database_connection(database_path) as db:
+            items = [community_post(post, db, user) for post in GALLERY_POSTS]
+        return {"items": items, "user": {key: user[key] for key in ("id", "display_name", "is_admin")} if user else None}
+
+    @app.get("/api/community/posts/{post_id}")
+    def get_community_post(post_id: str, user=Depends(optional_user)):
+        post = gallery_post(post_id)
+        with database_connection(database_path) as db:
+            item = community_post(post, db, user)
+            comments = db.execute("SELECT c.*, u.username, u.email FROM community_comments c JOIN users u ON u.id = c.user_id WHERE c.post_id = ? ORDER BY c.id DESC LIMIT 100", (post_id,)).fetchall()
+        return {"item": item, "comments": example_comments(post) + [community_comment(row, user) for row in reversed(comments)]}
+
+    @app.post("/api/community/posts/{post_id}/like")
+    def set_community_like(post_id: str, body: CommunityLikeRequest, user=Depends(current_user)):
+        gallery_post(post_id)
+        with database_connection(database_path) as db:
+            if body.liked:
+                db.execute("INSERT OR IGNORE INTO community_likes VALUES (?, ?, ?)", (post_id, user["id"], now_iso()))
+            else:
+                db.execute("DELETE FROM community_likes WHERE post_id = ? AND user_id = ?", (post_id, user["id"]))
+            count = db.execute("SELECT COUNT(*) FROM community_likes WHERE post_id = ?", (post_id,)).fetchone()[0]
+        return {"liked": body.liked, "likes_count": count}
+
+    @app.post("/api/community/posts/{post_id}/comments", status_code=201)
+    def add_community_comment(post_id: str, body: CommunityCommentRequest, request: Request, user=Depends(current_user)):
+        post = gallery_post(post_id)
+        rate_limit(request, "community-comment", 10, 60)
+        with database_connection(database_path) as db:
+            cursor = db.execute("INSERT INTO community_comments (post_id, user_id, content, created_at) VALUES (?, ?, ?, ?)", (post_id, user["id"], body.content, now_iso()))
+            row = db.execute("SELECT c.*, u.username, u.email FROM community_comments c JOIN users u ON u.id = c.user_id WHERE c.id = ?", (cursor.lastrowid,)).fetchone()
+            count = len(post["comments"]) + db.execute("SELECT COUNT(*) FROM community_comments WHERE post_id = ?", (post_id,)).fetchone()[0]
+        return {"comment": community_comment(row, user), "comments_count": count}
+
+    @app.delete("/api/community/comments/{comment_id}")
+    def delete_community_comment(comment_id: int, user=Depends(current_user)):
+        with database_connection(database_path) as db:
+            row = db.execute("SELECT * FROM community_comments WHERE id = ?", (comment_id,)).fetchone()
+            if not row:
+                raise HTTPException(404, "评论不存在")
+            if row["user_id"] != user["id"] and not user["is_admin"]:
+                raise HTTPException(403, "只能删除自己的评论")
+            db.execute("DELETE FROM community_comments WHERE id = ?", (comment_id,))
+        return {"ok": True}
 
     def issue_session(response: Response, user_id: int):
         token = secrets.token_urlsafe(32)

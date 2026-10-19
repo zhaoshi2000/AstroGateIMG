@@ -163,6 +163,63 @@ class AstroGateTests(unittest.TestCase):
             self.assertIn('reference-image', client.get('/studio').text)
             self.assertEqual(client.get('/assets/mark.svg').status_code, 200)
 
+    def test_public_community_has_fifteen_complete_posts(self):
+        with TestClient(self.app()) as client:
+            data = client.get('/api/community/posts').json()
+            self.assertIsNone(data['user'])
+            self.assertEqual(len(data['items']), 15)
+            self.assertEqual(len({post['id'] for post in data['items']}), 15)
+            for post in data['items']:
+                self.assertEqual(post['author'], '站长精选')
+                self.assertGreater(len(post['prompt']), 100)
+                self.assertEqual(post['comments_count'], 2)
+                self.assertTrue(post['comment_preview']['is_example'])
+                self.assertGreater(post['width'], 0)
+                self.assertEqual(client.get(post['thumbnail']).status_code, 200)
+            post_id = data['items'][0]['id']
+            self.assertEqual(len(client.get('/api/community/posts/' + post_id).json()['comments']), 2)
+            self.assertEqual(client.get('/api/community/posts/missing-post').status_code, 404)
+
+    def test_community_interactions_require_login_and_persist(self):
+        post_id = 'sakura-after-school'
+        path = '/api/community/posts/' + post_id
+        with TestClient(self.app()) as client:
+            self.assertEqual(client.post(path + '/like', json={'liked': True}).status_code, 401)
+            self.assertEqual(client.post(path + '/comments', json={'content': 'hello'}).status_code, 401)
+            self.register(client)
+            for _ in range(2):
+                self.assertEqual(client.post(path + '/like', json={'liked': True}).json()['likes_count'], 1)
+            self.assertEqual(client.post(path + '/comments', json={'content': '   '}).status_code, 422)
+            content = '<script>alert("literal text only")</script>'
+            saved = client.post(path + '/comments', json={'content': content})
+            self.assertEqual(saved.status_code, 201)
+            self.assertEqual(saved.json()['comments_count'], 3)
+            self.assertFalse(saved.json()['comment']['is_example'])
+            self.assertEqual(saved.json()['comment']['content'], content)
+        with TestClient(self.app()) as client:
+            self.login(client)
+            data = client.get(path).json()
+            self.assertTrue(data['item']['liked'])
+            self.assertEqual(data['item']['likes_count'], 1)
+            self.assertEqual(data['comments'][-1]['content'], content)
+            self.assertTrue(data['comments'][-1]['can_delete'])
+            self.assertEqual(client.post(path + '/like', json={'liked': False}).json()['likes_count'], 0)
+
+    def test_community_comment_ownership_and_public_privacy(self):
+        path = '/api/community/posts/sakura-after-school'
+        with TestClient(self.app()) as client:
+            self.register(client)
+            comment = client.post(path + '/comments', json={'content': '喜欢樱花和海湾的层次。'}).json()['comment']
+            client.post('/api/auth/logout')
+            public = client.get(path)
+            self.assertNotIn('artist@example.com', public.text)
+            self.assertFalse(public.json()['comments'][-1]['can_delete'])
+            self.register(client, 'another_artist')
+            self.assertEqual(client.delete('/api/community/comments/' + str(comment['id'])).status_code, 403)
+            self.login(client, 'operator')
+            self.assertEqual(client.delete('/api/community/comments/' + str(comment['id'])).status_code, 200)
+            self.assertEqual(client.get(path).json()['item']['comments_count'], 2)
+
     def test_registration_requires_verification_and_limits_wrong_codes(self):
         with TestClient(self.app()) as client:
             email = 'verified@example.com'

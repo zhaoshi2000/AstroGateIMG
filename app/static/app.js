@@ -33,6 +33,7 @@ function date(value) { try { return new Intl.DateTimeFormat('zh-CN', { month: '2
 function imageSource(value) { return typeof value === 'string' && (/^\/api\/images\/files\/[0-9a-f]{24}$/.test(value) || /^https?:\/\//.test(value) || /^data:image\/(png|jpeg|webp);base64,/.test(value)) ? value : ''; }
 function setBalance(balance) { if (state.user) state.user.credits = balance; $('#top-credits').textContent = balance; $('#wallet-balance').textContent = balance; }
 async function refreshUser() { const data = await api('/api/auth/me'); state.user = data.user; setBalance(data.user.credits); }
+function authDestination() { const next = new URLSearchParams(location.search).get('next'); return /^\/\?post=[a-z0-9-]+$/.test(next || '') ? next : '/studio'; }
 
 function authMode(mode) {
   state.mode = mode;
@@ -66,7 +67,7 @@ $('#auth-form').addEventListener('submit', async (event) => {
       ? { email: identifier, code: $('#email-code').value.trim(), password: $('#password').value }
       : { identifier, password: $('#password').value };
     await api(`/api/auth/${state.mode}`, { method: 'POST', body: JSON.stringify(body) });
-    location.assign('/studio');
+    location.assign(authDestination());
   } catch (error) { toast(error.message, true); } finally { button.disabled = false; }
 });
 
@@ -268,7 +269,7 @@ $('#logout-button').addEventListener('click', async () => { if (state.busy) retu
 (async function initialize() {
   try {
     const data = await api('/api/auth/me'); state.user = data.user;
-    if (['/login', '/register'].includes(location.pathname)) return location.replace('/studio');
+    if (['/login', '/register'].includes(location.pathname)) return location.replace(authDestination());
     if (location.pathname === '/admin' && !state.user.is_admin) return location.replace('/studio');
     const displayName = state.user.display_name || state.user.username;
     $('#user-name').textContent = displayName; $('#user-avatar').textContent = displayName[0].toUpperCase(); setBalance(state.user.credits);
@@ -277,7 +278,20 @@ $('#logout-button').addEventListener('click', async () => { if (state.busy) retu
     ['studio', 'wallet', 'admin'].forEach((name) => $(`#${name}-panel`).classList.toggle('is-hidden', name !== route));
     document.querySelector(`[data-route="${route}"]`).classList.add('active');
     $('#app-view').classList.remove('is-hidden'); $('#loading-view').classList.add('is-hidden');
-    if (route === 'studio') { await loadHistory(); const idea = new URLSearchParams(location.search).get('idea'); if (ideas[idea]) { $('#prompt').value = ideas[idea]; $('#prompt').dispatchEvent(new Event('input')); } if (location.hash === '#history') $('#history').scrollIntoView(); }
+    if (route === 'studio') {
+      await loadHistory();
+      try {
+        const draft = JSON.parse(sessionStorage.getItem('astrogate.community-draft') || 'null');
+        if (draft && typeof draft.prompt === 'string' && draft.prompt.length <= 4000) {
+          $('#prompt').value = draft.prompt;
+          if (Array.from($('#size').options).some((option) => option.value === draft.size)) $('#size').value = draft.size;
+          $('#prompt').dispatchEvent(new Event('input')); toast('参考提示词已带入，调整参数后即可创作');
+        }
+        sessionStorage.removeItem('astrogate.community-draft');
+      } catch {}
+      const idea = new URLSearchParams(location.search).get('idea'); if (ideas[idea]) { $('#prompt').value = ideas[idea]; $('#prompt').dispatchEvent(new Event('input')); }
+      if (location.hash === '#history') $('#history').scrollIntoView();
+    }
     if (route === 'wallet') await loadWallet();
     if (route === 'admin') await Promise.all([loadUsers(), loadCodes()]);
   } catch (error) {
