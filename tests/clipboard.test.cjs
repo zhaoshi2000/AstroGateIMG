@@ -19,6 +19,13 @@ class Element {
   dispatchEvent(event) { this.events[event.type]?.(event); }
 }
 async function main() {
+  const studioHtml = fs.readFileSync(path.join(__dirname, '../app/static/index.html'), 'utf8');
+  const sizeOptions = studioHtml.match(/<select id="size">([\s\S]*?)<\/select>/)?.[1];
+  assert.ok(sizeOptions, 'Studio must include aspect ratio options');
+  const selectedSizes = [...sizeOptions.matchAll(/<option value="([^"]+)" selected>/g)].map((match) => match[1]);
+  assert.deepEqual(selectedSizes, ['1536x864'], 'A new creation defaults to 16:9 widescreen');
+  const initialPrefix = studioHtml.match(/<textarea id="prompt-prefix"[^>]*>([\s\S]*?)<\/textarea>/)?.[1];
+  assert.ok(initialPrefix, 'Studio must expose an editable prompt prefix');
   const elements = new Map(); const documentEvents = {};
   const document = {
     body: new Element(),
@@ -27,7 +34,10 @@ async function main() {
     addEventListener: (name, callback) => { documentEvents[name] = callback; },
   };
   const drafts = new Map([['astrogate.community-draft', JSON.stringify({ prompt: 'Showcase prompt carried into the studio', size: '864x1536' })]]);
-  document.querySelector('#size').options = [{ value: '1024x1024' }, { value: '864x1536' }];
+  document.querySelector('#size').options = [{ value: '1536x864' }, { value: '864x1536' }];
+  document.querySelector('#size').value = selectedSizes[0];
+  document.querySelector('#prompt-prefix').value = initialPrefix;
+  document.querySelector('#prompt-style').value = 'none';
   const context = vm.createContext({ document, window: { addEventListener: () => {} }, location: { pathname: '/studio', search: '', hash: '' },
     URL, URLSearchParams, crypto: webcrypto, File, Event, navigator: {}, Intl, console,
     sessionStorage: { getItem: (key) => drafts.get(key), removeItem: (key) => drafts.delete(key) },
@@ -39,6 +49,7 @@ async function main() {
   assert.equal(document.body.classList.contains('studio-theme'), true, 'Studio must use its dedicated dark workspace theme');
   assert.equal(elements.get('#prompt').value, 'Showcase prompt carried into the studio');
   assert.equal(elements.get('#size').value, '864x1536');
+  assert.equal(elements.get('#prompt-prefix').value, '', 'Imported full prompt must not receive a second default prefix');
   assert.equal(drafts.size, 0, 'Applying a showcase draft must consume it once');
   context.location.search = '?next=' + encodeURIComponent('/?post=sakura-after-school');
   assert.equal(vm.runInContext('authDestination()', context), '/?post=sakura-after-school');
@@ -91,6 +102,42 @@ async function main() {
   await elements.get('#use-result-reference').events.click();
   assert.equal(vm.runInContext('state.references.length', context), 1, 'Current artwork can be used as the next generation reference');
   assert.equal(elements.get('#generation-mode').textContent, '图生图 · 1 张参考图');
-  console.log('PASS: clipboard images, multiple previews, removal, size/count limits, normal text paste');
+  assert.equal(elements.get('#prompt-prefix').value, '', 'Reused artwork prompt must not receive another prefix');
+  vm.runInContext('clearReferences()', context);
+  elements.get('#prompt-prefix').value = '主体清晰，构图完整。';
+  elements.get('#prompt-style').value = 'anime';
+  elements.get('#prompt-avoid').value = '水印';
+  elements.get('#prompt').value = '雨夜的城堡';
+  elements.get('#prompt').dispatchEvent(new Event('input'));
+  const composed = '主体清晰，构图完整。\n动漫插画风格，细腻线条，柔和光影。\n雨夜的城堡\n请尽量避免：水印';
+  assert.equal(vm.runInContext('composePrompt()', context), composed);
+  assert.equal(elements.get('#prompt-final').textContent, composed, 'Preview must show the exact prompt to be submitted');
+  elements.get('#prompt').value = '长'.repeat(4000);
+  elements.get('#prompt').dispatchEvent(new Event('input'));
+  assert.equal(elements.get('#prompt-final-error').classList.contains('is-hidden'), false, 'Overlength combined prompts must show an error');
+  let generationCalls = 0;
+  context.fetch = async (url, options = {}) => {
+    if (options.method === 'POST' && url.startsWith('/api/images/')) generationCalls += 1;
+    throw new Error('Overlength prompt must not reach the API');
+  };
+  await elements.get('#generation-form').events.submit({ preventDefault() {} });
+  assert.equal(generationCalls, 0, 'Overlength prompt must be blocked before credits can be reserved');
+  elements.get('#prompt').value = '雨夜的城堡';
+  elements.get('#prompt').dispatchEvent(new Event('input'));
+  elements.get('#size').value = '1536x864';
+  let submitted;
+  context.fetch = async (url, options = {}) => {
+    if (url === '/api/images/generations') {
+      submitted = JSON.parse(options.body);
+      return { ok: true, status: 200, json: async () => ({ credits: 1, item: { id: historyId, image_src: historyImage, prompt: submitted.prompt, mode: 'text-to-image', size: submitted.size, credits_cost: 1, created_at: '2026-10-19T10:00:00Z' } }) };
+    }
+    if (url === '/api/auth/me') return { ok: true, status: 200, json: async () => ({ user: { username: 'artist', credits: 1, is_admin: false } }) };
+    throw new Error('Unexpected request: ' + url);
+  };
+  await elements.get('#generation-form').events.submit({ preventDefault() {} });
+  assert.equal(submitted.prompt, composed, 'The API must receive exactly what the preview showed');
+  assert.equal(submitted.size, '1536x864');
+  assert.equal(elements.get('#result-prompt').textContent, composed);
+  console.log('PASS: clipboard references, prompt preview/submission/length guard, and default widescreen');
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; });

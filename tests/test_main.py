@@ -84,8 +84,9 @@ class AstroGateTests(unittest.TestCase):
     def test_widescreen_and_phone_ratios_reach_both_image_endpoints(self):
         with TestClient(self.app(2)) as client:
             self.register(client)
-            landscape = client.post('/api/images/generations', json={'prompt': 'a wide blue horizon', 'size': '1536x864'})
+            landscape = client.post('/api/images/generations', json={'prompt': 'a wide blue horizon'})
             self.assertEqual(landscape.status_code, 200, landscape.text)
+            self.assertEqual(landscape.json()['item']['size'], '1536x864')
             portrait = client.post('/api/images/edits', json={'prompt': 'a phone wallpaper', 'size': '864x1536', 'image_data_urls': [REFERENCE]})
             self.assertEqual(portrait.status_code, 200, portrait.text)
             self.assertEqual([call['size'] for call in self.calls], ['1536x864', '864x1536'])

@@ -135,7 +135,7 @@ class ImageGenerationRequest(BaseModel):
         "1280x960", "960x1280", "1536x864", "864x1536",
         "1024x1280", "1280x1024", "1536x768", "768x1536",
         "1792x768", "768x1792",
-    ] = "1024x1024"
+    ] = "1536x864"
     quality: str = Field(default="medium", pattern=r"^(low|medium|high)$")
 
     @field_validator("prompt")

@@ -60,3 +60,23 @@ body.studio-theme .toast{background:#392f52;border:1px solid #655482;color:#f3ed
 @media(max-width:450px){body.studio-theme #studio-panel .prompt-help{font-size:8px}body.studio-theme #studio-panel .preview-empty{min-height:405px}body.studio-theme #studio-panel .preview-empty-gallery{height:220px}body.studio-theme #studio-panel .preview-empty-copy{padding:35px 12px 23px}body.studio-theme #studio-panel .history-grid{grid-template-columns:1fr}}
 @media(prefers-reduced-motion:reduce){body.studio-theme #studio-panel .preview-empty.generating .preview-empty-gallery{animation:none}}
 @media(max-width:450px){body.studio-theme #studio-panel .prompt-help{font-size:10px}body.studio-theme #studio-panel .preview-empty-copy>span:last-child{font-size:10px}}
+
+body.studio-theme #studio-panel .prompt-settings{background:#11182a;border:1px solid #3d4461;border-radius:11px;padding:12px;margin:2px 0 4px}
+body.studio-theme #studio-panel .prompt-settings summary{display:flex;align-items:center;justify-content:space-between;gap:10px;cursor:pointer;list-style:none;color:#e8def8;font-size:12px;font-weight:650}
+body.studio-theme #studio-panel .prompt-settings summary::-webkit-details-marker{display:none}
+body.studio-theme #studio-panel .prompt-settings summary::after{content:'⌄';font-size:17px;color:#c3acd9;transition:transform .2s}
+body.studio-theme #studio-panel .prompt-settings[open] summary::after{transform:rotate(180deg)}
+body.studio-theme #studio-panel .prompt-settings-summary{display:grid;gap:2px}
+body.studio-theme #studio-panel .prompt-settings-summary small{font-size:9px;color:#9da5c0;font-weight:400}
+body.studio-theme #studio-panel .prompt-settings-body{display:grid;gap:9px;padding-top:12px}
+body.studio-theme #studio-panel .prompt-settings .stack-label{font-size:11px;color:#dcd8eb;gap:6px}
+body.studio-theme #studio-panel .prompt-settings .stack-label small{font-size:9px;color:#9ba3bc;font-weight:400}
+body.studio-theme #studio-panel .prompt-settings textarea{min-height:62px;font-size:11px;line-height:1.6;padding:9px 10px}
+body.studio-theme #studio-panel .prompt-settings select{width:100%;font-size:11px;padding:9px 10px}
+body.studio-theme #studio-panel .prompt-settings-note{color:#a7aac0;font-size:9px;line-height:1.55;margin:0}
+body.studio-theme #studio-panel .prompt-preview{background:#1d253a;border:1px solid #424c6b;border-radius:9px;padding:11px}
+body.studio-theme #studio-panel .prompt-preview-heading{display:flex;justify-content:space-between;align-items:center;gap:8px;color:#e5daf3;font-size:10px}
+body.studio-theme #studio-panel .prompt-preview-heading span{color:#adb3ca;font-size:9px;white-space:nowrap}
+body.studio-theme #studio-panel .prompt-preview-heading span.over-limit{color:#ffa7b4;font-weight:700}
+body.studio-theme #studio-panel #prompt-final{max-height:150px;overflow:auto;overflow-wrap:anywhere;white-space:pre-wrap;color:#bac0d4;font-size:10px;line-height:1.6;margin:7px 0 0;scrollbar-width:thin}
+body.studio-theme #studio-panel #prompt-final-error{color:#ffa7b4;font-size:10px;line-height:1.5;margin:7px 0 0}

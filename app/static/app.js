@@ -11,6 +11,15 @@ const ideas = {
   space: '一座面朝海面的暖色拱门建筑，柔和的午后阳光，天然石材与细腻肌理，地中海风格，建筑摄影。',
   abstract: '漂浮的紫色玻璃球体与金属圆环，柔和光线，浅薰衣草色背景，抽象艺术，精致的材质细节。',
 };
+const promptStyles = {
+  none: '',
+  anime: '动漫插画风格，细腻线条，柔和光影。',
+  photo: '写实摄影风格，自然材质与真实光线。',
+  fantasy: '奇幻插画风格，丰富层次与史诗氛围。',
+  cyber: '赛博朋克风格，霓虹光影与未来都市氛围。',
+  science: '科学图解风格，清晰布局与易辨认的视觉层级。',
+  furry: '兽人角色插画风格，重视角色表情与毛发质感。',
+};
 
 class ApiError extends Error { constructor(message, status, retryAfter = 0) { super(message); this.status = status; this.retryAfter = retryAfter; } }
 async function api(path, options = {}) {
@@ -186,7 +195,30 @@ $('#paste-reference').addEventListener('click', async () => {
   } catch { toast('可以直接按 Ctrl + V（Mac：⌘ + V）粘贴图片'); }
 });
 function asDataUrl(file) { return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = () => reject(new Error('图片读取失败，请重新添加')); reader.readAsDataURL(file); }); }
-$('#prompt').addEventListener('input', () => $('#prompt-count').textContent = `${$('#prompt').value.length} / 4000`);
+function composePrompt() {
+  const prefix = $('#prompt-prefix').value.trim();
+  const style = promptStyles[$('#prompt-style').value] || '';
+  const description = $('#prompt').value.trim();
+  const avoid = $('#prompt-avoid').value.trim();
+  return [prefix, style, description, avoid ? `请尽量避免：${avoid}` : ''].filter(Boolean).join('\n');
+}
+function updatePromptPreview() {
+  const prompt = composePrompt();
+  $('#prompt-count').textContent = `${$('#prompt').value.length} / 4000`;
+  $('#prompt-final').textContent = prompt || '输入画面描述后，可在这里确认完整提示词。';
+  $('#prompt-final-count').textContent = `${prompt.length} / 4000`;
+  $('#prompt-final-count').classList.toggle('over-limit', prompt.length > 4000);
+  $('#prompt-final-error').classList.toggle('is-hidden', prompt.length <= 4000);
+}
+function clearPromptModifiers() {
+  $('#prompt-prefix').value = '';
+  $('#prompt-style').value = 'none';
+  $('#prompt-avoid').value = '';
+  updatePromptPreview();
+}
+['#prompt', '#prompt-prefix', '#prompt-avoid'].forEach((selector) => $(selector).addEventListener('input', updatePromptPreview));
+$('#prompt-style').addEventListener('change', updatePromptPreview);
+updatePromptPreview();
 $('#prompt').addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
     event.preventDefault();
@@ -226,7 +258,11 @@ $('#use-result-reference').addEventListener('click', async () => {
     const before = state.references.length;
     await addReferences([new File([blob], `作品参考图.${type.split('/')[1]}`, { type })]);
     if (state.references.length === before) return;
-    if (!$('#prompt').value.trim()) { $('#prompt').value = item.prompt || ''; $('#prompt').dispatchEvent(new Event('input')); }
+    if (!$('#prompt').value.trim()) {
+      clearPromptModifiers();
+      $('#prompt').value = item.prompt || '';
+      updatePromptPreview();
+    }
     $('#prompt').focus();
     $('.composer').scrollIntoView?.({ behavior: 'smooth', block: 'start' });
   } catch (error) { toast(error.message || '无法将作品加入参考图', true); }
@@ -263,14 +299,16 @@ function renderHistory() {
 async function loadHistory() { const data = await api('/api/images/history'); state.history = data.items; renderHistory(); }
 $('#generation-form').addEventListener('submit', async (event) => {
   event.preventDefault(); if (state.busy) return;
-  if (state.user.credits < 1) { toast('积分不足，请先前往积分中心兑换充值', true); return; }
   if (!$('#prompt').value.trim()) return toast('请填写画面描述', true);
+  const prompt = composePrompt();
+  if (prompt.length > 4000) { $('#prompt-settings').open = true; toast('完整提示词超过 4000 字，请缩短前置词、描述或避免元素', true); return; }
+  if (state.user.credits < 1) { toast('积分不足，请先前往积分中心兑换充值', true); return; }
   state.busy = true; const button = $('#generate-button'); button.disabled = true; button.textContent = '✦ 正在创作，请稍候…';
   $('#generation-status').textContent = '已预留 1 积分。生成需要一些时间，请保持页面打开。';
   $('#generation-empty').classList.add('generating');
   try {
     const references = await Promise.all(state.references.map((item) => asDataUrl(item.file)));
-    const body = { prompt: $('#prompt').value.trim(), model: 'gpt-image-2', size: $('#size').value, quality: $('#quality').value };
+    const body = { prompt, model: 'gpt-image-2', size: $('#size').value, quality: $('#quality').value };
     if (references.length) body.image_data_urls = references;
     const data = await api(`/api/images/${references.length ? 'edits' : 'generations'}`, { method: 'POST', headers: { 'Idempotency-Key': crypto.randomUUID() }, body: JSON.stringify(body) });
     setBalance(data.credits); showResult(data.item); state.history.unshift(data.item); renderHistory();
@@ -308,6 +346,7 @@ $('#logout-button').addEventListener('click', async () => { if (state.busy) retu
       try {
         const draft = JSON.parse(sessionStorage.getItem('astrogate.community-draft') || 'null');
         if (draft && typeof draft.prompt === 'string' && draft.prompt.length <= 4000) {
+          clearPromptModifiers();
           $('#prompt').value = draft.prompt;
           if (Array.from($('#size').options).some((option) => option.value === draft.size)) $('#size').value = draft.size;
           $('#prompt').dispatchEvent(new Event('input')); toast('参考提示词已带入，调整参数后即可创作');
