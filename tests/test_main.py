@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 import httpx
 from fastapi.testclient import TestClient
@@ -21,21 +22,28 @@ class AstroGateTests(unittest.TestCase):
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.calls = []
+        self.mailbox = {}
 
     def app(self, credits=0, handler=None):
         def upstream(request):
             self.calls.append(json.loads(request.content))
             return httpx.Response(200, json={'data': [{'b64_json': PNG}]})
         return create_app(Settings(Path(self.directory.name), 'https://upstream.example', 'secret', False,
-                                   httpx.MockTransport(handler or upstream), 'operator', PASSWORD, credits))
+                                   httpx.MockTransport(handler or upstream), 'operator', PASSWORD, credits,
+                                   mail_sender=lambda email, code: self.mailbox.update({email: code})))
 
     def register(self, client, name='artist'):
-        response = client.post('/api/auth/register', json={'username': name, 'password': PASSWORD})
+        email = name if '@' in name else name + '@example.com'
+        sent = client.post('/api/auth/email-code', json={'email': email})
+        self.assertEqual(sent.status_code, 200, sent.text)
+        self.assertNotIn('code', sent.json())
+        response = client.post('/api/auth/register', json={'email': email, 'password': PASSWORD, 'code': self.mailbox[email]})
         self.assertEqual(response.status_code, 201)
         return response.json()['user']
 
     def login(self, client, name='artist'):
-        response = client.post('/api/auth/login', json={'username': name, 'password': PASSWORD})
+        identifier = name if name == 'operator' or '@' in name else name + '@example.com'
+        response = client.post('/api/auth/login', json={'identifier': identifier, 'password': PASSWORD})
         self.assertEqual(response.status_code, 200)
 
     def test_auth_registration_starts_with_zero_credits(self):
@@ -50,7 +58,8 @@ class AstroGateTests(unittest.TestCase):
             client.post('/api/auth/logout')
             self.assertEqual(client.get('/api/auth/me').status_code, 401)
             self.login(client)
-            self.assertEqual(client.get('/api/auth/me').json()['user']['username'], 'artist')
+            self.assertEqual(client.get('/api/auth/me').json()['user']['email'], 'artist@example.com')
+            self.assertTrue(client.get('/api/auth/me').json()['user']['email_verified'])
 
     def test_multi_reference_generation_cost_and_idempotency(self):
         with TestClient(self.app(3)) as client:
@@ -142,6 +151,76 @@ class AstroGateTests(unittest.TestCase):
             self.assertIn('0.05', client.get('/').text)
             self.assertIn('reference-image', client.get('/studio').text)
             self.assertEqual(client.get('/assets/mark.svg').status_code, 200)
+
+    def test_registration_requires_verification_and_limits_wrong_codes(self):
+        with TestClient(self.app()) as client:
+            email = 'verified@example.com'
+            self.assertEqual(client.post('/api/auth/register', json={'username': 'bypass', 'password': PASSWORD}).status_code, 422)
+            sent = client.post('/api/auth/email-code', json={'email': email})
+            self.assertEqual(sent.status_code, 200)
+            self.assertEqual(client.post('/api/auth/email-code', json={'email': email}).status_code, 429)
+            correct = self.mailbox[email]
+            wrong = '000000' if correct != '000000' else '111111'
+            for _ in range(5):
+                self.assertEqual(client.post('/api/auth/register', json={'email': email, 'password': PASSWORD, 'code': wrong}).status_code, 400)
+            blocked = client.post('/api/auth/register', json={'email': email, 'password': PASSWORD, 'code': correct})
+            self.assertEqual(blocked.status_code, 400)
+            with database_connection(Path(self.directory.name) / 'astrogate.db') as db:
+                row = db.execute('SELECT * FROM email_verifications WHERE email = ?', (email,)).fetchone()
+                self.assertEqual(row['attempts'], 5)
+                self.assertNotEqual(row['code_hash'], correct)
+
+    def test_resending_invalidates_previous_code_and_expired_codes_fail(self):
+        email = 'resend@example.com'
+        with TestClient(self.app()) as client, patch('app.main.secrets.randbelow', side_effect=[111111, 222222]):
+            self.assertEqual(client.post('/api/auth/email-code', json={'email': email}).status_code, 200)
+            with database_connection(Path(self.directory.name) / 'astrogate.db') as db:
+                db.execute("UPDATE email_verifications SET requested_at = '2020-01-01T00:00:00+00:00' WHERE email = ?", (email,))
+            self.assertEqual(client.post('/api/auth/email-code', json={'email': email}).status_code, 200)
+            self.assertEqual(client.post('/api/auth/register', json={'email': email, 'password': PASSWORD, 'code': '111111'}).status_code, 400)
+            with database_connection(Path(self.directory.name) / 'astrogate.db') as db:
+                db.execute("UPDATE email_verifications SET expires_at = '2020-01-01T00:00:00+00:00' WHERE email = ?", (email,))
+            self.assertEqual(client.post('/api/auth/register', json={'email': email, 'password': PASSWORD, 'code': '222222'}).status_code, 400)
+
+    def test_email_is_case_insensitive_and_duplicate_registration_is_blocked(self):
+        with TestClient(self.app()) as client:
+            self.register(client)
+            self.assertEqual(client.post('/api/auth/email-code', json={'email': 'ARTIST@example.com'}).status_code, 409)
+            client.post('/api/auth/logout')
+            self.login(client, 'ARTIST@EXAMPLE.COM')
+            self.assertEqual(client.get('/api/auth/me').json()['user']['email'], 'artist@example.com')
+
+    def test_existing_account_and_balance_are_preserved(self):
+        from app.main import hash_password, now_iso
+        with TestClient(self.app()) as client:
+            with database_connection(Path(self.directory.name) / 'astrogate.db') as db:
+                db.execute('INSERT INTO users (username, password_hash, created_at, credits) VALUES (?, ?, ?, ?)', ('existing_user', hash_password(PASSWORD), now_iso(), 17))
+            response = client.post('/api/auth/login', json={'username': 'existing_user', 'password': PASSWORD})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()['user']['credits'], 17)
+            self.assertIsNone(response.json()['user']['email'])
+
+    def test_smtp_error_is_reported_without_exposing_server_details(self):
+        def broken_sender(email, code):
+            raise RuntimeError('private-smtp-password-detail')
+        settings = Settings(Path(self.directory.name), '', '', False, mail_sender=broken_sender)
+        with TestClient(create_app(settings)) as client:
+            response = client.post('/api/auth/email-code', json={'email': 'mailfailure@example.com'})
+            self.assertEqual(response.status_code, 502)
+            self.assertNotIn('private-smtp-password-detail', response.text)
+            self.assertEqual(client.post('/api/auth/email-code', json={'email': 'mailfailure@example.com'}).status_code, 429)
+
+    def test_smtp_message_contains_plain_and_html_verification_code(self):
+        from app.mail import send_registration_code
+        settings = Settings(Path(self.directory.name), '', '', False, smtp_host='127.0.0.1')
+        with patch('app.mail.smtplib.SMTP') as transport:
+            smtp = transport.return_value.__enter__.return_value
+            send_registration_code(settings, 'recipient@example.com', '012345')
+            message = smtp.send_message.call_args.args[0]
+            self.assertEqual(message['To'], 'recipient@example.com')
+            self.assertIn('noreply@astrogate.sbs', message['From'])
+            self.assertIn('012345', message.get_body(preferencelist=('plain',)).get_content())
+            self.assertIn('012345', message.get_body(preferencelist=('html',)).get_content())
 
 
 if __name__ == '__main__':

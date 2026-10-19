@@ -16,14 +16,16 @@ import secrets
 import sqlite3
 from threading import Lock
 import time
-from typing import Annotated, Any
+from typing import Annotated, Any, Callable
 from urllib.parse import urlparse
 
 import httpx
 from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, EmailStr, Field, field_validator
+
+from app.mail import send_registration_code
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 STATIC_DIR = ROOT_DIR / "app" / "static"
@@ -57,6 +59,14 @@ class Settings:
     admin_username: str = ""
     admin_password: str = ""
     signup_credits: int = 0
+    smtp_host: str = ""
+    smtp_port: int = 25
+    smtp_security: str = "none"
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_sender: str = "noreply@astrogate.sbs"
+    email_code_secret: str = ""
+    mail_sender: Callable[[str, str], None] | None = None
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -69,6 +79,13 @@ class Settings:
             admin_username=os.getenv("ASTROGATE_ADMIN_USERNAME", "").strip(),
             admin_password=os.getenv("ASTROGATE_ADMIN_PASSWORD", ""),
             signup_credits=max(0, int(os.getenv("ASTROGATE_SIGNUP_CREDITS", "0"))),
+            smtp_host=os.getenv("ASTROGATE_SMTP_HOST", "").strip(),
+            smtp_port=int(os.getenv("ASTROGATE_SMTP_PORT", "25")),
+            smtp_security=os.getenv("ASTROGATE_SMTP_SECURITY", "none").strip().lower(),
+            smtp_username=os.getenv("ASTROGATE_SMTP_USERNAME", "").strip(),
+            smtp_password=os.getenv("ASTROGATE_SMTP_PASSWORD", ""),
+            smtp_sender=os.getenv("ASTROGATE_SMTP_SENDER", "noreply@astrogate.sbs").strip(),
+            email_code_secret=os.getenv("ASTROGATE_EMAIL_CODE_SECRET", ""),
         )
 
 
@@ -83,6 +100,25 @@ class Credentials(BaseModel):
         if not re.fullmatch(r"[A-Za-z0-9_.-]{3,32}", value):
             raise ValueError("账号需为 3 至 32 位字母、数字、点、下划线或连字符")
         return value
+
+
+class LoginRequest(BaseModel):
+    identifier: str = Field(min_length=3, max_length=254, validation_alias=AliasChoices("identifier", "email", "username"))
+    password: str = Field(min_length=8, max_length=128)
+
+
+class EmailCodeRequest(BaseModel):
+    email: EmailStr = Field(max_length=254)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        return str(value).lower()
+
+
+class EmailRegistrationRequest(EmailCodeRequest):
+    password: str = Field(min_length=8, max_length=128)
+    code: str = Field(pattern=r"^[0-9]{6}$")
 
 
 class ImageGenerationRequest(BaseModel):
@@ -202,12 +238,20 @@ def initialize_database(path: Path, settings: Settings) -> None:
                 fingerprint TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, error_message TEXT,
                 UNIQUE(user_id, request_key)
             );
+            CREATE TABLE IF NOT EXISTS email_verifications (
+                email TEXT PRIMARY KEY COLLATE NOCASE, code_hash TEXT NOT NULL,
+                expires_at TEXT NOT NULL, requested_at TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS email_verification_sends (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL, requested_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS verification_sends_by_email ON email_verification_sends(email, requested_at);
             CREATE INDEX IF NOT EXISTS image_history_by_user ON image_history(user_id, created_at DESC);
             CREATE INDEX IF NOT EXISTS sessions_by_expiry ON sessions(expires_at);
             CREATE INDEX IF NOT EXISTS ledger_by_user ON credit_ledger(user_id, id DESC);
         """)
         migrations = {
-            "users": {"credits": "INTEGER NOT NULL DEFAULT 0", "is_admin": "INTEGER NOT NULL DEFAULT 0"},
+            "users": {"credits": "INTEGER NOT NULL DEFAULT 0", "is_admin": "INTEGER NOT NULL DEFAULT 0", "email": "TEXT COLLATE NOCASE", "email_verified_at": "TEXT"},
             "image_history": {"mode": "TEXT NOT NULL DEFAULT 'text-to-image'", "reference_count": "INTEGER NOT NULL DEFAULT 0", "credits_cost": "INTEGER NOT NULL DEFAULT 0"},
         }
         for table, fields in migrations.items():
@@ -215,6 +259,7 @@ def initialize_database(path: Path, settings: Settings) -> None:
             for name, definition in fields.items():
                 if name not in columns:
                     db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+        db.execute("CREATE UNIQUE INDEX IF NOT EXISTS users_by_email ON users(email COLLATE NOCASE) WHERE email IS NOT NULL")
         if settings.admin_username and settings.admin_password:
             Credentials(username=settings.admin_username, password=settings.admin_password)
             admin = db.execute("SELECT id FROM users WHERE username = ?", (settings.admin_username,)).fetchone()
@@ -232,6 +277,8 @@ def initialize_database(path: Path, settings: Settings) -> None:
 
 def public_user(row) -> dict[str, Any]:
     return {"id": row["id"], "username": row["username"], "created_at": row["created_at"],
+            "email": row["email"], "email_verified": bool(row["email_verified_at"]),
+            "display_name": row["email"].split("@")[0] if row["email"] else row["username"],
             "credits": row["credits"], "is_admin": bool(row["is_admin"])}
 
 
@@ -277,14 +324,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     image_dir = config.data_dir / "images"
     attempts: dict[str, deque] = defaultdict(deque)
     attempt_lock = Lock()
+    verification_secret = config.email_code_secret
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        nonlocal verification_secret
         initialize_database(database_path, config)
         image_dir.mkdir(parents=True, exist_ok=True)
+        if not verification_secret:
+            secret_file = config.data_dir / ".email-code-secret"
+            if not secret_file.exists():
+                descriptor = os.open(secret_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                with os.fdopen(descriptor, "w") as handle:
+                    handle.write(secrets.token_urlsafe(48))
+            verification_secret = secret_file.read_text().strip()
         yield
 
-    app = FastAPI(title="AstroGate IMG", version="0.2.0", lifespan=lifespan, docs_url=None, redoc_url=None)
+    app = FastAPI(title="AstroGate IMG", version="0.3.0", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
 
     @app.middleware("http")
@@ -354,29 +410,79 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/config")
     def public_config():
         return {"upstream_configured": bool(config.upstream_url and config.upstream_api_key), "pricing": PRICE,
-                "max_reference_images": MAX_REFERENCES, "max_reference_bytes": MAX_IMAGE_BYTES}
+                "email_registration": True, "max_reference_images": MAX_REFERENCES, "max_reference_bytes": MAX_IMAGE_BYTES}
+
+    def code_digest(email: str, code: str) -> str:
+        return hmac.new(verification_secret.encode(), f"register:{email}:{code}".encode(), hashlib.sha256).hexdigest()
+
+    @app.post("/api/auth/email-code")
+    def request_email_code(body: EmailCodeRequest, request: Request):
+        if not config.smtp_host and config.mail_sender is None:
+            raise HTTPException(503, "邮件服务暂未配置，请稍后再试")
+        rate_limit(request, "email-code", 12, 3600)
+        now = datetime.now(timezone.utc)
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        with database_connection(database_path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT id FROM users WHERE email = ? OR username = ?", (body.email, body.email)).fetchone():
+                raise HTTPException(409, "该邮箱已注册，请直接登录")
+            existing = db.execute("SELECT requested_at FROM email_verifications WHERE email = ?", (body.email,)).fetchone()
+            if existing and (now - datetime.fromisoformat(existing["requested_at"])).total_seconds() < 60:
+                raise HTTPException(429, "验证码已发送，请 60 秒后再试")
+            cutoff = (now - timedelta(hours=1)).isoformat()
+            recent = db.execute("SELECT COUNT(*) FROM email_verification_sends WHERE email = ? AND requested_at >= ?", (body.email, cutoff)).fetchone()[0]
+            if recent >= 5:
+                raise HTTPException(429, "该邮箱发送次数过多，请稍后再试")
+            db.execute("INSERT INTO email_verifications (email, code_hash, expires_at, requested_at, attempts) VALUES (?, ?, ?, ?, 0) ON CONFLICT(email) DO UPDATE SET code_hash = excluded.code_hash, expires_at = excluded.expires_at, requested_at = excluded.requested_at, attempts = 0",
+                       (body.email, code_digest(body.email, code), (now + timedelta(minutes=10)).isoformat(), now.isoformat()))
+            db.execute("INSERT INTO email_verification_sends (email, requested_at) VALUES (?, ?)", (body.email, now.isoformat()))
+            db.execute("DELETE FROM email_verification_sends WHERE requested_at < ?", ((now - timedelta(days=2)).isoformat(),))
+        try:
+            if config.mail_sender is not None:
+                config.mail_sender(body.email, code)
+            else:
+                send_registration_code(config, body.email, code)
+        except Exception as exc:
+            # SMTP may have accepted DATA before a connection fails. Keep the code
+            # valid so a message that did arrive can still be used.
+            raise HTTPException(502, "邮件暂时未能发送，请稍后重试；若已收到邮件，可继续使用验证码") from exc
+        return {"ok": True, "expires_in": 600, "resend_after": 60}
 
     @app.post("/api/auth/register", status_code=201)
-    def register(body: Credentials, response: Response, request: Request):
+    def register(body: EmailRegistrationRequest, response: Response, request: Request):
         rate_limit(request, "register", 10, 3600)
+        password_hash = hash_password(body.password)
+        error = None
+        user = None
         with database_connection(database_path) as db:
-            try:
-                cursor = db.execute("INSERT INTO users (username, password_hash, created_at, credits) VALUES (?, ?, ?, ?)",
-                                    (body.username, hash_password(body.password), now_iso(), config.signup_credits))
-            except sqlite3.IntegrityError as exc:
-                raise HTTPException(409, "该账号已注册") from exc
-            user_id = cursor.lastrowid
-            if config.signup_credits:
-                ledger_entry(db, user_id, config.signup_credits, "welcome", "注册赠送", f"welcome:{user_id}")
-            user = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-        issue_session(response, user_id)
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT id FROM users WHERE email = ? OR username = ?", (body.email, body.email)).fetchone():
+                raise HTTPException(409, "该邮箱已注册，请直接登录")
+            verification = db.execute("SELECT * FROM email_verifications WHERE email = ?", (body.email,)).fetchone()
+            if not verification or verification["expires_at"] <= now_iso() or verification["attempts"] >= 5:
+                error = "验证码无效或已过期，请重新获取"
+            elif not hmac.compare_digest(verification["code_hash"], code_digest(body.email, body.code)):
+                db.execute("UPDATE email_verifications SET attempts = attempts + 1 WHERE email = ?", (body.email,))
+                error = "验证码不正确，请检查后重试"
+            else:
+                cursor = db.execute("INSERT INTO users (username, email, email_verified_at, password_hash, created_at, credits) VALUES (?, ?, ?, ?, ?, ?)",
+                                    (body.email, body.email, now_iso(), password_hash, now_iso(), config.signup_credits))
+                user_id = cursor.lastrowid
+                if config.signup_credits:
+                    ledger_entry(db, user_id, config.signup_credits, "welcome", "注册赠送", f"welcome:{user_id}")
+                db.execute("DELETE FROM email_verifications WHERE email = ?", (body.email,))
+                user = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        if error:
+            raise HTTPException(400, error)
+        issue_session(response, user["id"])
         return {"user": public_user(user)}
 
     @app.post("/api/auth/login")
-    def login(body: Credentials, response: Response, request: Request):
+    def login(body: LoginRequest, response: Response, request: Request):
         rate_limit(request, "login", 25, 60)
+        identifier = body.identifier.strip().lower()
         with database_connection(database_path) as db:
-            row = db.execute("SELECT * FROM users WHERE username = ?", (body.username,)).fetchone()
+            row = db.execute("SELECT * FROM users WHERE email = ? OR username = ?", (identifier, identifier)).fetchone()
         if not row or not verify_password(body.password, row["password_hash"]):
             raise HTTPException(401, "账号或密码错误")
         issue_session(response, row["id"])
@@ -416,7 +522,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/admin/users")
     def list_users(q: str = "", user=Depends(admin_user)):
         with database_connection(database_path) as db:
-            rows = db.execute("SELECT * FROM users WHERE username LIKE ? ORDER BY id DESC LIMIT 100", (f"%{q[:32]}%",)).fetchall()
+            rows = db.execute("SELECT * FROM users WHERE username LIKE ? OR email LIKE ? ORDER BY id DESC LIMIT 100", (f"%{q[:254]}%", f"%{q[:254]}%" )).fetchall()
             stats = db.execute("SELECT COUNT(*) AS users, COALESCE(SUM(credits), 0) AS credits FROM users").fetchone()
         return {"items": [public_user(row) for row in rows], "stats": dict(stats)}
 

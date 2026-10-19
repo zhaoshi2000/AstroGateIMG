@@ -31,6 +31,11 @@ async function main() {
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../app/static/app.js'), 'utf8'), context);
   await new Promise(setImmediate);
+  vm.runInContext("authMode('register')", context);
+  assert.equal(elements.get('#username').type, 'email', 'Registration must request an email address');
+  assert.equal(elements.get('#email-code').required, true, 'Registration must require an email code');
+  vm.runInContext("authMode('login')", context);
+  assert.equal(elements.get('#email-code').disabled, true, 'A hidden code input must not block existing-account login');
   let prevented = false;
   const image = (name) => new File([new Uint8Array([1, 2, 3])], name, { type: 'image/png' });
   documentEvents.paste({ clipboardData: { items: [image('one.png'), image('two.png')].map((file) => ({ kind: 'file', type: file.type, getAsFile: () => file })) }, preventDefault: () => { prevented = true; } });

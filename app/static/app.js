@@ -46,15 +46,58 @@ function authMode(mode) {
   $('#auth-subtitle').textContent = registering ? '注册账号，开启你的图像创作。' : '登录后，继续你的创作。';
   $('#auth-submit').textContent = registering ? '创建账号，开始创作 ↗' : '登录工作台 ↗';
   $('#password').autocomplete = registering ? 'new-password' : 'current-password';
+  $('#identity-label').textContent = registering ? '邮箱地址' : '邮箱 / 账号';
+  $('#username').type = registering ? 'email' : 'text';
+  $('#username').autocomplete = registering ? 'email' : 'username';
+  $('#username').placeholder = registering ? '请输入你的邮箱地址' : '请输入邮箱或已有账号';
+  $('#email-code-field').classList.toggle('is-hidden', !registering);
+  $('#email-code').required = registering;
+  $('#email-code').disabled = !registering;
+  $('#auth-subtitle').textContent = registering ? '验证邮箱后，开启你的图像创作。' : '使用邮箱和密码，继续你的创作。';
 }
 $('#login-tab').addEventListener('click', () => authMode('login'));
 $('#register-tab').addEventListener('click', () => authMode('register'));
 $('#auth-form').addEventListener('submit', async (event) => {
   event.preventDefault(); const button = $('#auth-submit'); button.disabled = true;
   try {
-    await api(`/api/auth/${state.mode}`, { method: 'POST', body: JSON.stringify({ username: $('#username').value.trim(), password: $('#password').value }) });
+    const identifier = $('#username').value.trim();
+    const body = state.mode === 'register'
+      ? { email: identifier, code: $('#email-code').value.trim(), password: $('#password').value }
+      : { identifier, password: $('#password').value };
+    await api(`/api/auth/${state.mode}`, { method: 'POST', body: JSON.stringify(body) });
     location.assign('/studio');
   } catch (error) { toast(error.message, true); } finally { button.disabled = false; }
+});
+
+let codeCountdown;
+let codeReadyAt = 0;
+let codeEmail = '';
+function updateCodeButton() {
+  const remaining = Math.max(0, Math.ceil((codeReadyAt - Date.now()) / 1000));
+  $('#send-email-code').disabled = remaining > 0;
+  $('#send-email-code').textContent = remaining ? `${remaining} 秒后重发` : '获取验证码';
+  if (!remaining) clearInterval(codeCountdown);
+}
+$('#username').addEventListener('input', () => {
+  if ($('#username').value.trim().toLowerCase() !== codeEmail) {
+    clearInterval(codeCountdown); codeReadyAt = 0; updateCodeButton();
+    $('#email-code').value = '';
+    $('#email-code-hint').textContent = '验证码 10 分钟内有效。';
+  }
+});
+$('#send-email-code').addEventListener('click', async () => {
+  if (!$('#username').reportValidity()) return;
+  const button = $('#send-email-code'); button.disabled = true; button.textContent = '正在发送…';
+  $('#username').disabled = true;
+  try {
+    const email = $('#username').value.trim().toLowerCase();
+    const result = await api('/api/auth/email-code', { method: 'POST', body: JSON.stringify({ email }) });
+    codeEmail = email; codeReadyAt = Date.now() + result.resend_after * 1000;
+    clearInterval(codeCountdown); codeCountdown = setInterval(updateCodeButton, 1000); updateCodeButton();
+    $('#email-code-hint').textContent = '验证码已发送，请查收邮箱，也可以检查垃圾邮件。';
+    $('#email-code').focus(); toast('验证码已发送，10 分钟内有效');
+  } catch (error) { button.disabled = false; button.textContent = '获取验证码'; toast(error.message, true); }
+  finally { $('#username').disabled = false; }
 });
 
 function renderReferences() {
@@ -200,7 +243,8 @@ $('#logout-button').addEventListener('click', async () => { if (state.busy) retu
     const data = await api('/api/auth/me'); state.user = data.user;
     if (['/login', '/register'].includes(location.pathname)) return location.replace('/studio');
     if (location.pathname === '/admin' && !state.user.is_admin) return location.replace('/studio');
-    $('#user-name').textContent = state.user.username; $('#user-avatar').textContent = state.user.username[0].toUpperCase(); setBalance(state.user.credits);
+    const displayName = state.user.display_name || state.user.username;
+    $('#user-name').textContent = displayName; $('#user-avatar').textContent = displayName[0].toUpperCase(); setBalance(state.user.credits);
     $('#admin-link').classList.toggle('is-hidden', !state.user.is_admin);
     const route = location.pathname === '/wallet' ? 'wallet' : location.pathname === '/admin' ? 'admin' : 'studio';
     ['studio', 'wallet', 'admin'].forEach((name) => $(`#${name}-panel`).classList.toggle('is-hidden', name !== route));

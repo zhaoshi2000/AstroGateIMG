@@ -13,7 +13,8 @@
 - 使用数据库事务防止并发透支，使用请求编号防止同一次生成重复扣费。
 - 积分流水、单次兑换码、管理员加减积分和兑换码管理。
 - 图片通过登录权限校验后访问，每位用户只能查看自己的作品。
-- 密码使用 PBKDF2-SHA256 哈希，会话使用 HttpOnly Cookie。
+- 使用邮箱与验证码注册、邮箱和密码登录；保留现有账号登录。验证码 10 分钟有效、60 秒重发间隔，支持错误次数和发信频率限制。
+- 密码使用 PBKDF2-SHA256 哈希，会话使用 HttpOnly Cookie。验证码使用 HMAC 保存，注册成功后立即失效。
 
 ## 本地启动
 
@@ -34,9 +35,15 @@ ASTROGATE_ADMIN_USERNAME=your-admin-name
 ASTROGATE_ADMIN_PASSWORD=your-admin-password
 ASTROGATE_COOKIE_SECURE=false
 ASTROGATE_SIGNUP_CREDITS=0
+ASTROGATE_SMTP_HOST=127.0.0.1
+ASTROGATE_SMTP_PORT=25
+ASTROGATE_SMTP_SECURITY=none
+ASTROGATE_SMTP_SENDER=noreply@astrogate.sbs
 ```
 
 管理员账号首次启动时创建；已有账号不会被环境变量重置密码。
+
+注册需要能发信的 SMTP 服务。当前生产环境使用同机 Postfix（127.0.0.1:25）发送 `noreply@astrogate.sbs` 的验证码邮件。使用其他邮箱供应商时填写 `ASTROGATE_SMTP_USERNAME`、`ASTROGATE_SMTP_PASSWORD`，并按供应商要求选择 `starttls`（一般 587）或 `ssl`（一般 465）。HMAC 密钥可通过 `ASTROGATE_EMAIL_CODE_SECRET` 设置，留空时自动生成到数据目录并持久保存。
 
 ```powershell
 .\run.ps1
@@ -49,7 +56,7 @@ ASTROGATE_SIGNUP_CREDITS=0
 | 路径 | 用途 |
 | --- | --- |
 | `/` | 官网首页、功能、价格与常见问题 |
-| `/register`、`/login` | 注册和登录 |
+| `/register`、`/login` | 邮箱验证码注册、邮箱或已有账号登录 |
 | `/studio` | 图片创作和个人作品库 |
 | `/wallet` | 积分余额、兑换码充值、积分流水 |
 | `/admin` | 管理员用户积分调整和兑换码管理 |
@@ -88,4 +95,4 @@ node --check app/static/app.js
 node tests/clipboard.test.cjs
 ```
 
-测试覆盖注册登录、零余额拦截、多图转发、扣费与幂等、失败退款、并发防透支、兑换码一次性、管理员权限、用户作品隔离和中断任务退款。
+测试覆盖邮箱验证码注册、过期及错误次数、重发失效、邮箱大小写、已有账号兼容、零余额拦截、多图转发、扣费与幂等、失败退款、并发防透支、兑换码一次性、管理员权限、用户作品隔离和中断任务退款。
