@@ -37,7 +37,14 @@ SESSION_COOKIE = "astrogate_session"
 MAX_IMAGE_BYTES = 50 * 1024 * 1024
 MAX_REFERENCES = 8
 PASSWORD_ITERATIONS = 600_000
-PRICE = {"credits_per_image": 1, "rmb_per_image": "0.05"}
+IMAGE_MODELS = (
+    {"id": "gpt-image-2", "label": "GPT Image 2", "credits_cost": 1, "price_rmb": "0.05"},
+    {"id": "gpt-image-2.5-flare", "label": "GPT Image 2.5 Flare", "credits_cost": 5, "price_rmb": "0.25"},
+    {"id": "gpt-image-2.5-sunburst", "label": "GPT Image 2.5 Sunburst", "credits_cost": 5, "price_rmb": "0.25"},
+)
+IMAGE_MODEL_BY_ID = {item["id"]: item for item in IMAGE_MODELS}
+PRICE = {"credits_per_image": 1, "rmb_per_image": "0.05", "rmb_per_credit": "0.05",
+         "models": {item["id"]: {"credits_cost": item["credits_cost"], "price_rmb": item["price_rmb"]} for item in IMAGE_MODELS}}
 GALLERY_POSTS = json.loads((ROOT_DIR / "app/gallery_catalog.json").read_text(encoding="utf-8"))
 GALLERY_BY_ID = {post["id"]: post for post in GALLERY_POSTS}
 
@@ -73,6 +80,10 @@ class Settings:
     smtp_sender: str = "noreply@astrogate.sbs"
     email_code_secret: str = ""
     mail_sender: Callable[[str, str], None] | None = None
+    text_api_base: str = ""
+    text_api_key: str = ""
+    text_model: str = "gpt-5.6-luna"
+    text_transport: httpx.AsyncBaseTransport | None = None
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -92,6 +103,9 @@ class Settings:
             smtp_password=os.getenv("ASTROGATE_SMTP_PASSWORD", ""),
             smtp_sender=os.getenv("ASTROGATE_SMTP_SENDER", "noreply@astrogate.sbs").strip(),
             email_code_secret=os.getenv("ASTROGATE_EMAIL_CODE_SECRET", ""),
+            text_api_base=os.getenv("ASTROGATE_TEXT_API_BASE", "").strip().rstrip("/"),
+            text_api_key=os.getenv("ASTROGATE_TEXT_API_KEY", "").strip(),
+            text_model=os.getenv("ASTROGATE_TEXT_MODEL", "gpt-5.6-luna").strip(),
         )
 
 
@@ -129,7 +143,7 @@ class EmailRegistrationRequest(EmailCodeRequest):
 
 class ImageGenerationRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=4000)
-    model: str = Field(default="gpt-image-2", pattern=r"^gpt-image-2$")
+    model: Literal["gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst"] = "gpt-image-2"
     size: Literal[
         "1024x1024", "1024x1536", "1536x1024",
         "1280x960", "960x1280", "1536x864", "864x1536",
@@ -149,6 +163,18 @@ class ImageGenerationRequest(BaseModel):
 class ImageEditRequest(ImageGenerationRequest):
     image_data_urls: list[str] = Field(default_factory=list, max_length=MAX_REFERENCES)
     image_data_url: str | None = None  # Compatibility with the first client release.
+
+
+class PromptAssistRequest(BaseModel):
+    idea: str = Field(min_length=2, max_length=1200)
+
+    @field_validator("idea")
+    @classmethod
+    def trim_idea(cls, value: str) -> str:
+        value = value.strip()
+        if len(value) < 2:
+            raise ValueError("请先写一点画面想法")
+        return value
 
 
 class CommunityLikeRequest(BaseModel):
@@ -284,6 +310,7 @@ def initialize_database(path: Path, settings: Settings) -> None:
             CREATE TABLE IF NOT EXISTS generation_jobs (
                 id TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), request_key TEXT NOT NULL,
                 fingerprint TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, error_message TEXT,
+                credits_cost INTEGER NOT NULL DEFAULT 1,
                 UNIQUE(user_id, request_key)
             );
             CREATE TABLE IF NOT EXISTS email_verifications (
@@ -319,6 +346,7 @@ def initialize_database(path: Path, settings: Settings) -> None:
         migrations = {
             "users": {"credits": "INTEGER NOT NULL DEFAULT 0", "is_admin": "INTEGER NOT NULL DEFAULT 0", "email": "TEXT COLLATE NOCASE", "email_verified_at": "TEXT"},
             "image_history": {"mode": "TEXT NOT NULL DEFAULT 'text-to-image'", "reference_count": "INTEGER NOT NULL DEFAULT 0", "credits_cost": "INTEGER NOT NULL DEFAULT 0"},
+            "generation_jobs": {"credits_cost": "INTEGER NOT NULL DEFAULT 1"},
         }
         for table, fields in migrations.items():
             columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
@@ -335,9 +363,10 @@ def initialize_database(path: Path, settings: Settings) -> None:
                 db.execute("INSERT INTO users (username, password_hash, created_at, is_admin) VALUES (?, ?, ?, 1)",
                            (settings.admin_username, hash_password(settings.admin_password), now_iso()))
         # One application worker owns jobs. Refund reservations interrupted by a restart.
-        for job in db.execute("SELECT id, user_id FROM generation_jobs WHERE status = 'pending'").fetchall():
-            db.execute("UPDATE users SET credits = credits + 1 WHERE id = ?", (job["user_id"],))
-            ledger_entry(db, job["user_id"], 1, "refund", "服务重启，积分已退回", f"refund:{job['id']}")
+        for job in db.execute("SELECT id, user_id, credits_cost FROM generation_jobs WHERE status = 'pending'").fetchall():
+            cost = job["credits_cost"]
+            db.execute("UPDATE users SET credits = credits + ? WHERE id = ?", (cost, job["user_id"]))
+            ledger_entry(db, job["user_id"], cost, "refund", "服务重启，积分已退回", f"refund:{job['id']}")
             db.execute("UPDATE generation_jobs SET status = 'failed', error_message = '服务重启，积分已退回' WHERE id = ?", (job["id"],))
 
 
@@ -391,6 +420,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     attempts: dict[str, deque] = defaultdict(deque)
     attempt_lock = Lock()
     verification_secret = config.email_code_secret
+    model_cache: dict[str, Any] = {"expires": 0.0, "ids": set()}
+    model_cache_lock = Lock()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -431,6 +462,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def rate_limit(request: Request, kind: str, limit: int, period: int) -> None:
         key = f"{kind}:{request.client.host if request.client else 'unknown'}"
+        with attempt_lock:
+            queue = attempts[key]
+            now = time.monotonic()
+            while queue and queue[0] < now - period:
+                queue.popleft()
+            if len(queue) >= limit:
+                retry_after = max(1, math.ceil(queue[0] + period - now))
+                raise HTTPException(429, "操作过于频繁，请稍后再试", headers={"Retry-After": str(retry_after)})
+            queue.append(now)
+
+    def rate_limit_user(user_id: int, kind: str, limit: int, period: int) -> None:
+        key = f"{kind}:user:{user_id}"
         with attempt_lock:
             queue = attempts[key]
             now = time.monotonic()
@@ -674,6 +717,60 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def public_config():
         return {"upstream_configured": bool(config.upstream_url and config.upstream_api_key), "pricing": PRICE,
                 "email_registration": True, "max_reference_images": MAX_REFERENCES, "max_reference_bytes": MAX_IMAGE_BYTES}
+
+    async def image_model_items() -> list[dict[str, Any]]:
+        configured = bool(config.upstream_url and config.upstream_api_key)
+        ids: set[str] = set()
+        if configured:
+            with model_cache_lock:
+                fresh = time.monotonic() < model_cache["expires"]
+                if fresh:
+                    ids = set(model_cache["ids"])
+            if not fresh:
+                try:
+                    async with httpx.AsyncClient(timeout=httpx.Timeout(8, connect=4), transport=config.upstream_transport, trust_env=False) as client:
+                        response = await client.get(f"{config.upstream_url}/v1/models", headers={"Authorization": f"Bearer {config.upstream_api_key}"})
+                        response.raise_for_status()
+                        payload = response.json()
+                    data = payload.get("data", []) if isinstance(payload, dict) else []
+                    ids = {item["id"] for item in data if isinstance(item, dict) and isinstance(item.get("id"), str)}
+                except (httpx.HTTPError, ValueError, TypeError):
+                    ids = set()
+                with model_cache_lock:
+                    model_cache["ids"] = ids
+                    model_cache["expires"] = time.monotonic() + 30
+        return [{**item, "available": configured and (item["id"] == "gpt-image-2" or item["id"] in ids)}
+                for item in IMAGE_MODELS]
+
+    @app.get("/api/images/models")
+    async def available_image_models():
+        return {"items": await image_model_items()}
+
+    @app.post("/api/prompts/assist")
+    async def assist_prompt(body: PromptAssistRequest, user=Depends(current_user)):
+        if not config.text_api_base or not config.text_api_key or not config.text_model:
+            raise HTTPException(503, "提示词帮写暂未配置")
+        rate_limit_user(user["id"], "prompt-assist", 8, 600)
+        payload = {
+            "model": config.text_model,
+            "stream": False,
+            "messages": [
+                {"role": "system", "content": "你是图片创作提示词助手。根据用户的想法写一段可直接用于图像生成的中文提示词，明确主体、场景、构图、光线、色彩、氛围和细节；尊重用户的原意，不虚构画面上的文字，不写模型参数。只返回提示词正文，控制在 100 至 500 个汉字。"},
+                {"role": "user", "content": body.idea},
+            ],
+        }
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(35, connect=8), transport=config.text_transport, trust_env=False) as client:
+                response = await client.post(f"{config.text_api_base}/chat/completions", headers={"Authorization": f"Bearer {config.text_api_key}"}, json=payload)
+                response.raise_for_status()
+                data = response.json()
+            choices = data.get("choices", []) if isinstance(data, dict) else []
+            prompt = choices[0].get("message", {}).get("content", "") if choices and isinstance(choices[0], dict) else ""
+            if not isinstance(prompt, str) or not prompt.strip():
+                raise ValueError("empty prompt")
+            return {"prompt": prompt.strip()[:4000]}
+        except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError) as exc:
+            raise HTTPException(502, "提示词暂时无法生成，请稍后重试") from exc
 
     def code_digest(email: str, code: str) -> str:
         return hmac.new(verification_secret.encode(), f"register:{email}:{code}".encode(), hashlib.sha256).hexdigest()
@@ -926,7 +1023,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 (image_dir / f"{item_id}.{extension}").unlink(missing_ok=True)
         return {"ok": True}
 
-    def reserve(user_id: int, key: str, fingerprint: str):
+    def reserve(user_id: int, key: str, fingerprint: str, credits_cost: int, model: str, available: bool):
         with database_connection(database_path) as db:
             db.execute("BEGIN IMMEDIATE")
             previous = db.execute("SELECT * FROM generation_jobs WHERE user_id = ? AND request_key = ?", (user_id, key)).fetchone()
@@ -938,25 +1035,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     if item:
                         return previous["id"], dict(item)
                 raise HTTPException(409, "该请求已提交，请查看图集或重新发起生成")
-            if not db.execute("UPDATE users SET credits = credits - 1 WHERE id = ? AND credits >= 1", (user_id,)).rowcount:
-                raise HTTPException(402, "积分不足，请先兑换充值；每张图片需要 1 积分")
+            if not available:
+                raise HTTPException(503, "当前图片节点尚未开放该模型，请选择其他模型")
+            if not db.execute("UPDATE users SET credits = credits - ? WHERE id = ? AND credits >= ?", (credits_cost, user_id, credits_cost)).rowcount:
+                raise HTTPException(402, f"积分不足，请先兑换充值；当前模型每张图片需要 {credits_cost} 积分")
             job_id = secrets.token_hex(12)
-            db.execute("INSERT INTO generation_jobs (id, user_id, request_key, fingerprint, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)", (job_id, user_id, key, fingerprint, now_iso()))
-            ledger_entry(db, user_id, -1, "generation", "生成图片 · 1 张", f"generation:{job_id}")
+            db.execute("INSERT INTO generation_jobs (id, user_id, request_key, fingerprint, status, created_at, credits_cost) VALUES (?, ?, ?, ?, 'pending', ?, ?)", (job_id, user_id, key, fingerprint, now_iso(), credits_cost))
+            ledger_entry(db, user_id, -credits_cost, "generation", f"生成图片 · {model} · 1 张", f"generation:{job_id}")
             return job_id, None
 
     def refund(job_id: str, message: str):
         with database_connection(database_path) as db:
             db.execute("BEGIN IMMEDIATE")
-            job = db.execute("SELECT user_id, status FROM generation_jobs WHERE id = ?", (job_id,)).fetchone()
+            job = db.execute("SELECT user_id, status, credits_cost FROM generation_jobs WHERE id = ?", (job_id,)).fetchone()
             if job and job["status"] == "pending":
-                db.execute("UPDATE users SET credits = credits + 1 WHERE id = ?", (job["user_id"],))
-                ledger_entry(db, job["user_id"], 1, "refund", "生成失败，积分已退回", f"refund:{job_id}")
+                db.execute("UPDATE users SET credits = credits + ? WHERE id = ?", (job["credits_cost"], job["user_id"]))
+                ledger_entry(db, job["user_id"], job["credits_cost"], "refund", "生成失败，积分已退回", f"refund:{job_id}")
                 db.execute("UPDATE generation_jobs SET status = 'failed', error_message = ? WHERE id = ?", (message[:500], job_id))
 
     async def run_generation(body, references, user, request_key):
         if not config.upstream_url or not config.upstream_api_key:
             raise HTTPException(503, "图片服务暂未配置")
+        models = {item["id"]: item for item in await image_model_items()}
+        selected_model = models[body.model]
+        credits_cost = selected_model["credits_cost"]
         if len(references) > MAX_REFERENCES:
             raise HTTPException(400, "最多可使用 8 张参考图")
         decoded = [decode_reference(value) for value in references]
@@ -970,7 +1072,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,120}", key):
             raise HTTPException(400, "请求编号无效")
         fingerprint = hash_token(json.dumps(payload, sort_keys=True))
-        job_id, previous = reserve(user["id"], key, fingerprint)
+        job_id, previous = reserve(user["id"], key, fingerprint, credits_cost, body.model, selected_model["available"])
         if previous:
             return {"item": previous, "credits": current_balance(user["id"])}
         output_path = None
@@ -1008,10 +1110,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             output_path = image_dir / f"{job_id}.{extension}"
             output_path.write_bytes(output)
             item = {"id": job_id, "prompt": body.prompt, "model": body.model, "size": body.size, "quality": body.quality,
-                    "mode": mode, "reference_count": len(references), "credits_cost": 1, "image_src": f"/api/images/files/{job_id}", "status": "succeeded", "created_at": now_iso()}
+                    "mode": mode, "reference_count": len(references), "credits_cost": credits_cost, "image_src": f"/api/images/files/{job_id}", "status": "succeeded", "created_at": now_iso()}
             with database_connection(database_path) as db:
                 db.execute("INSERT INTO image_history (id, user_id, prompt, model, size, quality, mode, reference_count, credits_cost, image_src, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                           (job_id, user["id"], body.prompt, body.model, body.size, body.quality, mode, len(references), 1, item["image_src"], "succeeded", item["created_at"]))
+                           (job_id, user["id"], body.prompt, body.model, body.size, body.quality, mode, len(references), credits_cost, item["image_src"], "succeeded", item["created_at"]))
                 db.execute("UPDATE generation_jobs SET status = 'succeeded' WHERE id = ?", (job_id,))
             return {"item": item, "credits": current_balance(user["id"])}
         except BaseException as exc:

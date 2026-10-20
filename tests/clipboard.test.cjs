@@ -138,6 +138,36 @@ async function main() {
   assert.equal(submitted.prompt, composed, 'The API must receive exactly what the preview showed');
   assert.equal(submitted.size, '1536x864');
   assert.equal(elements.get('#result-prompt').textContent, composed);
-  console.log('PASS: clipboard references, prompt preview/submission/length guard, and default widescreen');
+  vm.runInContext('setBalance(5)', context);
+  context.fetch = async (url, options = {}) => {
+    if (url === '/api/images/models') return { ok: true, status: 200, json: async () => ({ items: [
+      { id: 'gpt-image-2', label: 'GPT Image 2', available: true, credits_cost: 1, price_rmb: '0.05' },
+      { id: 'gpt-image-2.5-flare', label: 'GPT Image 2.5 Flare', available: true, credits_cost: 5, price_rmb: '0.25' },
+      { id: 'gpt-image-2.5-sunburst', label: 'GPT Image 2.5 Sunburst', available: false, credits_cost: 5, price_rmb: '0.25' },
+    ] }) };
+    if (url === '/api/prompts/assist') return { ok: true, status: 200, json: async () => ({ prompt: '月光下的古城，宽画幅，石墙与云海，柔和冷色调。' }) };
+    if (url === '/api/images/generations') {
+      submitted = JSON.parse(options.body);
+      return { ok: true, status: 200, json: async () => ({ credits: 0, item: { id: historyId, image_src: historyImage, prompt: submitted.prompt, model: submitted.model, mode: 'text-to-image', size: submitted.size, credits_cost: 5, created_at: '2026-10-19T10:00:00Z' } }) };
+    }
+    if (url === '/api/auth/me') return { ok: true, status: 200, json: async () => ({ user: { username: 'artist', credits: 0, is_admin: false } }) };
+    throw new Error('Unexpected request: ' + url);
+  };
+  await vm.runInContext('loadImageModels()', context);
+  assert.equal(elements.get('#image-model').children[1].disabled, false, 'Image 2.5 becomes selectable only when the image node reports it');
+  assert.equal(elements.get('#image-model').children[2].disabled, true, 'Unlisted image variant remains disabled');
+  elements.get('#prompt').value = '月光下的古城';
+  await elements.get('#assist-prompt').events.click();
+  assert.equal(elements.get('#assist-suggestion').classList.contains('is-hidden'), false, 'AI suggestion remains reviewable before applying');
+  assert.equal(elements.get('#prompt').value, '月光下的古城', 'AI must not silently overwrite the idea');
+  elements.get('#apply-assist').events.click();
+  assert.equal(elements.get('#prompt').value, '月光下的古城，宽画幅，石墙与云海，柔和冷色调。');
+  elements.get('#image-model').value = 'gpt-image-2.5-flare';
+  elements.get('#image-model').dispatchEvent(new Event('change'));
+  assert.match(elements.get('#generation-cost').textContent, /5 积分/);
+  await elements.get('#generation-form').events.submit({ preventDefault() {} });
+  assert.equal(submitted.model, 'gpt-image-2.5-flare', 'Selected paid model must reach the image API');
+  assert.match(elements.get('#generation-status').textContent, /5 积分/);
+  console.log('PASS: clipboard, prompt preview, AI suggestion, model availability, five-credit pricing, and default widescreen');
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; });

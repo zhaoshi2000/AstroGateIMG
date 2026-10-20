@@ -1,5 +1,8 @@
 const $ = (selector) => document.querySelector(selector);
-const state = { user: null, mode: 'login', references: [], history: [], activeImageItem: null, busy: false, reading: false };
+const state = { user: null, mode: 'login', references: [], history: [], activeImageItem: null, busy: false, reading: false,
+  models: [{ id: 'gpt-image-2', label: 'GPT Image 2', available: true, credits_cost: 1, price_rmb: '0.05' },
+    { id: 'gpt-image-2.5-flare', label: 'GPT Image 2.5 Flare', available: false, credits_cost: 5, price_rmb: '0.25' },
+    { id: 'gpt-image-2.5-sunburst', label: 'GPT Image 2.5 Sunburst', available: false, credits_cost: 5, price_rmb: '0.25' }] };
 if (['/studio', '/wallet'].includes(location.pathname)) {
   document.body?.classList.add('studio-theme');
   document.querySelector('meta[name="theme-color"]')?.setAttribute('content', '#0b1020');
@@ -48,6 +51,44 @@ function date(value) { try { return new Intl.DateTimeFormat('zh-CN', { month: '2
 function imageSource(value) { return typeof value === 'string' && (/^\/api\/images\/files\/[0-9a-f]{24}$/.test(value) || /^https?:\/\//.test(value) || /^data:image\/(png|jpeg|webp);base64,/.test(value)) ? value : ''; }
 function setBalance(balance) { if (state.user) state.user.credits = balance; $('#top-credits').textContent = balance; $('#wallet-balance').textContent = balance; }
 async function refreshUser() { const data = await api('/api/auth/me'); state.user = data.user; setBalance(data.user.credits); }
+function selectedImageModel() {
+  return state.models.find((item) => item.id === $('#image-model').value) || state.models[0];
+}
+function updateModelPrice() {
+  const model = selectedImageModel();
+  $('#generation-cost').textContent = `${model.credits_cost} 积分 / 张 · ¥${model.price_rmb}`;
+  $('#current-model-label').textContent = `当前模型 · ${model.label}`;
+  $('#model-availability').textContent = model.available
+    ? `${model.label} 已开放，每张 ${model.credits_cost} 积分（¥${model.price_rmb}）。2.5 是否可用以图片节点为准。`
+    : `${model.label} 尚未在图片节点开放；可先使用 GPT Image 2。`;
+  $('#generate-button').disabled = !model.available || state.busy;
+}
+function renderImageModels() {
+  const select = $('#image-model');
+  const previous = select.value;
+  select.replaceChildren(...state.models.map((item) => {
+    const option = document.createElement('option');
+    option.value = item.id;
+    option.disabled = !item.available;
+    option.textContent = `${item.label} · ${item.available ? `${item.credits_cost} 积分 / 张` : '暂未开放'}`;
+    return option;
+  }));
+  select.value = state.models.some((item) => item.id === previous && item.available) ? previous :
+    (state.models.find((item) => item.available)?.id || 'gpt-image-2');
+  updateModelPrice();
+}
+async function loadImageModels() {
+  try {
+    const result = await api('/api/images/models');
+    if (Array.isArray(result.items) && result.items.length) state.models = state.models.map((fallback) => {
+      const item = result.items.find((candidate) => candidate.id === fallback.id);
+      return item && Number.isInteger(item.credits_cost) && item.credits_cost === fallback.credits_cost
+        ? { ...fallback, ...item, available: item.available === true } : { ...fallback, available: false };
+    });
+  } catch { state.models = state.models.map((item) => ({ ...item, available: item.id === 'gpt-image-2' })); }
+  renderImageModels();
+}
+$('#image-model').addEventListener('change', updateModelPrice);
 function authDestination() { const next = new URLSearchParams(location.search).get('next'); return /^\/\?(?:post=[a-z0-9-]+|mine=1|compose=1(?:&image=[0-9a-f]{24})?)$/.test(next || '') ? next : state.user?.is_admin ? '/admin' : '/studio'; }
 
 function authMode(mode) {
@@ -227,6 +268,31 @@ $('#prompt').addEventListener('keydown', (event) => {
 });
 document.querySelectorAll('[data-idea]').forEach((button) => button.addEventListener('click', () => { $('#prompt').value = ideas[button.dataset.idea]; $('#prompt').dispatchEvent(new Event('input')); $('#prompt').focus(); }));
 
+$('#assist-prompt').addEventListener('click', async () => {
+  const idea = $('#prompt').value.trim();
+  if (idea.length < 2) return toast('先写下至少两个字的画面想法', true);
+  if (idea.length > 1200) return toast('AI 帮写支持 1200 字以内的想法，请先精简描述', true);
+  const button = $('#assist-prompt'); button.disabled = true; button.textContent = '正在帮你构思…';
+  $('#assist-hint').textContent = '正在生成提示词建议，请稍候。';
+  try {
+    const result = await api('/api/prompts/assist', { method: 'POST', body: JSON.stringify({ idea }) });
+    $('#assist-suggestion-text').textContent = result.prompt;
+    $('#assist-suggestion').classList.remove('is-hidden');
+    $('#assist-hint').textContent = '可先查看建议，采用后仍能继续修改。';
+  } catch (error) { $('#assist-hint').textContent = error.message; toast(error.message, true); }
+  finally { button.disabled = false; button.textContent = '✧ AI 帮写提示词'; }
+});
+$('#apply-assist').addEventListener('click', () => {
+  const suggestion = $('#assist-suggestion-text').textContent.trim();
+  if (!suggestion) return;
+  $('#prompt').value = suggestion;
+  $('#prompt').dispatchEvent(new Event('input'));
+  $('#assist-suggestion').classList.add('is-hidden');
+  $('#assist-hint').textContent = '建议已带入画面描述，可继续编辑后生成。';
+  $('#prompt').focus();
+});
+$('#dismiss-assist').addEventListener('click', () => $('#assist-suggestion').classList.add('is-hidden'));
+
 function showResult(item) {
   const src = imageSource(item.image_src); if (!src) return;
   state.activeImageItem = item;
@@ -234,7 +300,8 @@ function showResult(item) {
   $('#result-image').src = src; $('#result-full').href = src; $('#download-result').href = src;
   $('#result-prompt').textContent = item.prompt;
   $('#share-result').href = '/?compose=1&image=' + encodeURIComponent(item.id);
-  $('#result-meta').replaceChildren(...[item.mode === 'image-to-image' ? `图生图 · ${item.reference_count || 1} 张参考图` : '文生图', item.size, `${item.credits_cost ?? 1} 积分`].map((value) => { const el = document.createElement('span'); el.textContent = value; return el; }));
+  const modelName = state.models.find((model) => model.id === item.model)?.label || item.model || 'GPT Image 2';
+  $('#result-meta').replaceChildren(...[item.mode === 'image-to-image' ? `图生图 · ${item.reference_count || 1} 张参考图` : '文生图', modelName, item.size, `${item.credits_cost ?? 1} 积分`].map((value) => { const el = document.createElement('span'); el.textContent = value; return el; }));
 }
 $('#zoom-result').addEventListener('click', () => {
   const source = imageSource(state.activeImageItem?.image_src);
@@ -302,19 +369,22 @@ $('#generation-form').addEventListener('submit', async (event) => {
   if (!$('#prompt').value.trim()) return toast('请填写画面描述', true);
   const prompt = composePrompt();
   if (prompt.length > 4000) { $('#prompt-settings').open = true; toast('完整提示词超过 4000 字，请缩短前置词、描述或避免元素', true); return; }
-  if (state.user.credits < 1) { toast('积分不足，请先前往积分中心兑换充值', true); return; }
+  const model = selectedImageModel();
+  if (!model.available) return toast('该模型尚未在图片节点开放，请选择可用模型', true);
+  if (state.user.credits < model.credits_cost) { toast(`积分不足；${model.label} 每张需要 ${model.credits_cost} 积分`, true); return; }
   state.busy = true; const button = $('#generate-button'); button.disabled = true; button.textContent = '✦ 正在创作，请稍候…';
-  $('#generation-status').textContent = '已预留 1 积分。生成需要一些时间，请保持页面打开。';
+  $('#generation-status').textContent = `已预留 ${model.credits_cost} 积分。生成需要一些时间，请保持页面打开。`;
   $('#generation-empty').classList.add('generating');
   try {
     const references = await Promise.all(state.references.map((item) => asDataUrl(item.file)));
-    const body = { prompt, model: 'gpt-image-2', size: $('#size').value, quality: $('#quality').value };
+    const body = { prompt, model: model.id, size: $('#size').value, quality: $('#quality').value };
     if (references.length) body.image_data_urls = references;
     const data = await api(`/api/images/${references.length ? 'edits' : 'generations'}`, { method: 'POST', headers: { 'Idempotency-Key': crypto.randomUUID() }, body: JSON.stringify(body) });
     setBalance(data.credits); showResult(data.item); state.history.unshift(data.item); renderHistory();
-    $('#generation-status').textContent = '作品已完成，本次消耗 1 积分。'; toast('新作品已保存，消耗 1 积分');
+    const spent = data.item.credits_cost ?? model.credits_cost;
+    $('#generation-status').textContent = `作品已完成，本次消耗 ${spent} 积分。`; toast(`新作品已保存，消耗 ${spent} 积分`);
   } catch (error) { $('#generation-status').textContent = '生成未完成，请查看积分余额和明细后重试。'; toast(error.message, true); }
-  finally { state.busy = false; button.disabled = false; button.textContent = '✦ 开始生成'; $('#generation-empty').classList.remove('generating'); try { await refreshUser(); } catch {} }
+  finally { state.busy = false; updateModelPrice(); button.textContent = '✦ 生成图像'; $('#generation-empty').classList.remove('generating'); try { await refreshUser(); } catch {} }
 });
 
 async function loadWallet() {
@@ -342,6 +412,7 @@ $('#logout-button').addEventListener('click', async () => { if (state.busy) retu
     document.querySelector(`[data-route="${route}"]`).classList.add('active');
     $('#app-view').classList.remove('is-hidden'); $('#loading-view').classList.add('is-hidden');
     if (route === 'studio') {
+      await loadImageModels();
       await loadHistory();
       try {
         const draft = JSON.parse(sessionStorage.getItem('astrogate.community-draft') || 'null');
