@@ -116,7 +116,27 @@ docker compose up -d --build
 
 使用 OpenAI 兼容图片接口：文生图为 `/v1/images/generations`，图生图为 `/v1/images/edits`。图生图使用 JSON `images` 数组（包含 `b64_json`、`filename`、`mime_type`），适配本项目正在使用的 `chatgpt2api`。上游密钥只保留在服务端。
 
-## 验证
+## AstroGate 网关接入
+
+服务端设置 `ASTROGATE_GATEWAY_BRIDGE_KEY`（至少 32 字符的随机独立密钥），并设置
+`ASTROGATE_GATEWAY_PUBLIC_ORIGIN=https://img.astrogate.sbs`。主站配置相同密钥和本站
+HTTPS 地址；用户继续使用主站的 API 密钥。密钥不要写入 Git 或发布包。
+
+私有接口位于 `/internal/astrogate`：提供 `/v1/models`、`/v1/images/generations`、
+`/v1/images/edits`、`/accounts/sync` 与 `/accounts/status`。这些接口仅接受桥接密钥；
+不会使用客户 Cookie 或扣除 IMG 网站积分，由主站按原有权限和计费规则处理。
+图生图参考图使用上传文件转换后的 base64，不在服务端抓取任意网址。
+
+授权同步只接收主站启用账号的 access token，主站负责续期；本站不会收到该批账号的
+refresh token 或密码。轮换后替换副本，停用后移除托管副本，保留独立导入的其他账号。
+同步状态只返回数量和时间，不返回凭据。
+
+生成图片通过无法猜测的 `/gateway-assets/` 链接下载，七天后过期。网站项目应把图片
+保存进自身素材目录。重复使用相同 `gateway_request_id` 可复用成功结果；结果不明的
+请求不会自动再次消耗图片额度。持久化 `data/gateway-bridge.sqlite3` 和
+`data/gateway-assets/`。
+
+## 验证命令
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v

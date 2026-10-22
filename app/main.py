@@ -30,6 +30,7 @@ from pydantic import AliasChoices, BaseModel, EmailStr, Field, field_validator
 from app.mail import send_registration_code
 from app.community_media import MAX_POST_BYTES, MAX_POST_IMAGES, MAX_UPLOAD_BYTES, store_post_images
 from app.upstream_admin import project_accounts
+from app.gateway_bridge import create_gateway_router
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 STATIC_DIR = ROOT_DIR / "app" / "static"
@@ -84,6 +85,8 @@ class Settings:
     text_api_key: str = ""
     text_model: str = "gpt-5.6-luna"
     text_transport: httpx.AsyncBaseTransport | None = None
+    gateway_bridge_key: str = ""
+    gateway_public_origin: str = "https://img.astrogate.sbs"
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -106,6 +109,8 @@ class Settings:
             text_api_base=os.getenv("ASTROGATE_TEXT_API_BASE", "").strip().rstrip("/"),
             text_api_key=os.getenv("ASTROGATE_TEXT_API_KEY", "").strip(),
             text_model=os.getenv("ASTROGATE_TEXT_MODEL", "gpt-5.6-luna").strip(),
+            gateway_bridge_key=os.getenv("ASTROGATE_GATEWAY_BRIDGE_KEY", "").strip(),
+            gateway_public_origin=os.getenv("ASTROGATE_GATEWAY_PUBLIC_ORIGIN", "https://img.astrogate.sbs").strip(),
         )
 
 
@@ -438,6 +443,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         yield
 
     app = FastAPI(title="AstroGate IMG", version="0.6.0", lifespan=lifespan, docs_url=None, redoc_url=None)
+    app.include_router(create_gateway_router(config))
     app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
 
     @app.middleware("http")
@@ -456,7 +462,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        if request.url.path.startswith("/api/"):
+        if request.url.path.startswith(("/api/", "/internal/")):
             response.headers["Cache-Control"] = "no-store"
         return response
 

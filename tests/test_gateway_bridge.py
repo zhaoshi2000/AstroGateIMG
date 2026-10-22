@@ -1,0 +1,149 @@
+import base64
+import io
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import unittest
+
+import httpx
+from fastapi.testclient import TestClient
+from PIL import Image
+
+from app.main import Settings, create_app, database_connection
+
+BRIDGE_KEY = "test-only-private-bridge-key-at-least-32-characters"
+UPSTREAM_KEY = "test-only-upstream-key"
+
+
+class GatewayBridgeTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        encoded = io.BytesIO()
+        Image.new("RGB", (2, 2), "blue").save(encoded, "PNG")
+        self.png = base64.b64encode(encoded.getvalue()).decode()
+        self.calls = []
+        self.records = []
+        self.fail_import = False
+        self.fail_image = False
+
+    def app(self):
+        def upstream(request):
+            self.assertEqual(request.headers["authorization"], "Bearer " + UPSTREAM_KEY)
+            body = json.loads(request.content) if request.content else None
+            self.calls.append((request.method, request.url.path, body))
+            if request.url.path == "/v1/models":
+                return httpx.Response(200, json={"data": [{"id": "gpt-image-2"}, {"id": "gpt-text"}]})
+            if request.url.path.startswith("/v1/images/"):
+                if self.fail_image:
+                    return httpx.Response(500, json={"detail": UPSTREAM_KEY})
+                return httpx.Response(200, json={"data": [{"b64_json": self.png}]})
+            if request.method == "GET":
+                return httpx.Response(200, json={"items": list(self.records)})
+            if request.method == "POST":
+                if self.fail_import:
+                    return httpx.Response(500, json={"detail": UPSTREAM_KEY})
+                for item in body["accounts"]:
+                    self.records = [row for row in self.records if row["access_token"] != item["access_token"]]
+                    self.records.append(item)
+                return httpx.Response(200, json={"added": len(body["accounts"])})
+            if request.method == "DELETE":
+                self.records = [row for row in self.records if row["access_token"] not in body["tokens"]]
+                return httpx.Response(200, json={"deleted": len(body["tokens"])})
+            raise AssertionError("Unexpected upstream call")
+        return create_app(Settings(Path(self.directory.name), "https://upstream.invalid", UPSTREAM_KEY, False,
+                                   httpx.MockTransport(upstream), gateway_bridge_key=BRIDGE_KEY,
+                                   gateway_public_origin="https://img.example.test"))
+
+    def headers(self):
+        return {"Authorization": "Bearer " + BRIDGE_KEY}
+
+    def test_private_key_required_and_no_customer_cookie_fallback(self):
+        with TestClient(self.app()) as client:
+            path = "/internal/astrogate/v1/images/generations"
+            self.assertEqual(client.post(path, json={"prompt": "draw"}).status_code, 401)
+            self.assertEqual(client.post(path, headers={"Authorization": "Bearer " + UPSTREAM_KEY}, json={"prompt": "draw"}).status_code, 401)
+            self.assertEqual(client.get("/internal/astrogate/accounts/status").status_code, 401)
+            self.assertEqual(self.calls, [])
+
+    def test_images_are_real_private_downloads_without_customer_credit_changes(self):
+        with TestClient(self.app()) as client:
+            response = client.post("/internal/astrogate/v1/images/generations", headers=self.headers(), json={"model": "gpt-image-2", "prompt": "a blue logo", "n": 1})
+            self.assertEqual(response.status_code, 200, response.text)
+            item = response.json()["data"][0]
+            self.assertEqual(item["b64_json"], self.png)
+            path = item["url"].removeprefix("https://img.example.test")
+            self.assertEqual(client.get(path).content, base64.b64decode(self.png))
+            self.assertEqual(client.get("/gateway-assets/predictable.png").status_code, 404)
+            for secret in (BRIDGE_KEY, UPSTREAM_KEY):
+                self.assertNotIn(secret, response.text)
+            with database_connection(Path(self.directory.name) / "astrogate.db") as db:
+                self.assertEqual(db.execute("SELECT count(*) FROM generation_jobs").fetchone()[0], 0)
+            self.fail_image = True
+            failed = client.post("/internal/astrogate/v1/images/generations", headers=self.headers(), json={"prompt": "draw"})
+            self.assertEqual(failed.status_code, 502)
+            self.assertNotIn(UPSTREAM_KEY, failed.text)
+
+    def test_image_references_are_forwarded_without_remote_url_fetches(self):
+        with TestClient(self.app()) as client:
+            response = client.post("/internal/astrogate/v1/images/edits", headers=self.headers(), json={"prompt": "edit", "images": [{"image_url": "data:image/png;base64," + self.png}]})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(self.calls[-1][2]["images"][0]["b64_json"], self.png)
+            denied = client.post("/internal/astrogate/v1/images/edits", headers=self.headers(), json={"prompt": "edit", "images": [{"image_url": "http://127.0.0.1/private"}]})
+            self.assertEqual(denied.status_code, 400)
+
+    def test_same_gateway_request_cannot_generate_or_charge_twice(self):
+        with TestClient(self.app()) as client:
+            payload = {"prompt": "draw a logo", "gateway_request_id": "a" * 64}
+            first = client.post("/internal/astrogate/v1/images/generations", headers=self.headers(), json=payload)
+            second = client.post("/internal/astrogate/v1/images/generations", headers=self.headers(), json=payload)
+            self.assertEqual(first.status_code, 200)
+            self.assertEqual(second.status_code, 200)
+            self.assertEqual(first.json(), second.json())
+            self.assertEqual(first.headers["x-request-id"], "a" * 64)
+            self.assertEqual(len(self.calls), 1)
+            mismatch = client.post("/internal/astrogate/v1/images/generations", headers=self.headers(), json={**payload, "prompt": "different"})
+            self.assertEqual(mismatch.status_code, 409)
+
+    def test_gateway_model_discovery_and_image_streams(self):
+        with TestClient(self.app()) as client:
+            models = client.get("/internal/astrogate/v1/models", headers=self.headers())
+            self.assertEqual([row["id"] for row in models.json()["data"]], ["gpt-image-2"])
+            response = client.post("/internal/astrogate/v1/images/generations", headers=self.headers(), json={"prompt": "blue logo", "stream": True})
+            self.assertTrue(response.headers["content-type"].startswith("text/event-stream"))
+            event = json.loads(response.text.split("data: ", 1)[1])
+            self.assertEqual(event["type"], "image_generation.completed")
+            self.assertEqual(event["b64_json"], self.png)
+
+    def test_sync_is_idempotent_access_token_only_and_does_not_delete_other_accounts(self):
+        self.records = [{"access_token": "independent-web-token", "refresh_token": "independent-refresh"},
+                        {"access_token": "old-managed", "astrogate_managed_by": "astrogate-gateway", "astrogate_source_id": "42"}]
+        body = {"complete": True, "accounts": [{"source_id": "42", "access_token": "new-managed", "refresh_token": "never-copy-this-refresh", "email": "fixture@example.test"}]}
+        with TestClient(self.app()) as client:
+            first = client.post("/internal/astrogate/accounts/sync", headers=self.headers(), json=body)
+            self.assertEqual(first.status_code, 200, first.text)
+            self.assertEqual(first.json()["synced"], 1)
+            self.assertEqual(first.json()["removed"], 1)
+            imported = next(row for row in self.records if row["access_token"] == "new-managed")
+            self.assertEqual(imported["refresh_token"], "")
+            self.assertNotIn("never-copy-this-refresh", json.dumps(self.calls))
+            self.assertIn("independent-web-token", {row["access_token"] for row in self.records})
+            second = client.post("/internal/astrogate/accounts/sync", headers=self.headers(), json=body)
+            self.assertEqual(second.json()["synced"], 0)
+            self.assertEqual(second.json()["skipped"], 1)
+            empty = client.post("/internal/astrogate/accounts/sync", headers=self.headers(), json={"complete": True, "accounts": []})
+            self.assertEqual(empty.json()["removed"], 1)
+            self.assertEqual(len(self.records), 1)
+            for token in ("independent-web-token", "new-managed", "old-managed"):
+                self.assertNotIn(token, first.text)
+
+    def test_failed_import_keeps_old_credentials_and_reports_sanitized_error(self):
+        self.records = [{"access_token": "old-managed", "astrogate_managed_by": "astrogate-gateway", "astrogate_source_id": "42"}]
+        self.fail_import = True
+        with TestClient(self.app()) as client:
+            response = client.post("/internal/astrogate/accounts/sync", headers=self.headers(), json={"complete": True, "accounts": [{"source_id": "42", "access_token": "new-managed"}]})
+            self.assertEqual(response.status_code, 502)
+            self.assertNotIn(UPSTREAM_KEY, response.text)
+            self.assertEqual(self.records[0]["access_token"], "old-managed")
+            self.assertFalse(any(method == "DELETE" for method, _, _ in self.calls))
+            self.assertFalse(client.get("/internal/astrogate/accounts/status", headers=self.headers()).json()["running"])
