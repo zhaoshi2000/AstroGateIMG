@@ -311,6 +311,50 @@ body { min-width: 320px; }
 #wallet-panel .payment-order .positive { color: #87dfb4; }
 #wallet-panel .payment-order .pending { color: #e5c088; }
 
+/* The multi-image paste dialog shares the studio's reference list. */
+.reference-dialog {
+  width: min(680px, calc(100vw - 28px));
+  max-width: 680px;
+  max-height: calc(100dvh - 28px);
+  margin: auto;
+  padding: clamp(20px, 3vw, 30px);
+  overflow-y: auto;
+  border: 1px solid #665389;
+  border-radius: 18px;
+  background: #171d33;
+  box-shadow: 0 30px 100px #02040bd9;
+  color: #f7f4ff;
+}
+.reference-dialog::backdrop { background: #030610d9; backdrop-filter: blur(7px); }
+.reference-dialog-head { display: flex; justify-content: space-between; gap: 18px; }
+.reference-dialog-head .panel-overline { color: #c5a2ff; font-size: 11px; letter-spacing: .15em; }
+.reference-dialog-head h2 { margin: 7px 0 8px; color: #fff; font-size: 26px; }
+.reference-dialog-head p { margin: 0 0 19px; color: #b7bdd2; font-size: 12px; line-height: 1.7; }
+.reference-dialog-close { align-self: start; flex: 0 0 auto; width: 35px; height: 35px; border: 1px solid #5a6380; border-radius: 9px; background: #252d48; color: #fff; font-size: 23px; cursor: pointer; }
+.reference-paste-zone { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; min-height: 170px; padding: 20px; border: 2px dashed #8070b1; border-radius: 13px; background: #11182d; color: #f5efff; text-align: center; cursor: text; caret-color: transparent; outline: none; }
+.reference-paste-zone:focus-visible, .reference-paste-zone.dragging { border-color: #c6a2ff; box-shadow: 0 0 0 4px #b48afa26; background: #1b2340; }
+.reference-paste-icon { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 11px; background: #7f60bf; font-size: 23px; }
+.reference-paste-zone strong { font-size: 15px; }
+.reference-paste-zone small { color: #aeb8d1; font-size: 11px; }
+.reference-dialog-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; margin: 16px 0; }
+.reference-dialog-tools .button { padding: 10px 13px; border: 1px solid #74649c; background: #303752; color: #f2e9ff; font-size: 11px; }
+.reference-dialog-tools .button:hover { background: #414a6d; }
+.reference-dialog-tools span { margin-left: auto; color: #cbb6f1; font-size: 12px; font-weight: 650; }
+.reference-dialog-list { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; min-height: 54px; }
+.reference-dialog-list:empty::before { content: '还没有参考图。粘贴后会在这里逐张显示。'; grid-column: 1 / -1; align-self: center; color: #aeb8d1; font-size: 12px; }
+.reference-dialog-list .reference-item img { border-color: #5a6380; }
+.reference-dialog-list .reference-item small { color: #b8bdd1; font-size: 11px; }
+.reference-dialog-list .reference-item button { width: 27px; height: 27px; border-radius: 7px; font-size: 18px; cursor: pointer; }
+.reference-dialog-note { margin: 15px 0; color: #aeb8d1; font-size: 11px; line-height: 1.6; }
+.reference-dialog-footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding-top: 16px; border-top: 1px solid #424b69; }
+.reference-dialog-footer .text-button { color: #d0b7ff; }
+.reference-dialog-footer .button { padding: 12px 17px; border-radius: 9px; background: #8f62de; color: #fff; font-size: 12px; }
+@media (max-width: 560px) {
+  .reference-dialog-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .reference-dialog-tools span { width: 100%; margin-left: 0; }
+  .reference-dialog-head h2 { font-size: 22px; }
+}
+
 @media (max-width: 850px) {
   .auth-shell { grid-template-columns: minmax(0, .8fr) minmax(390px, 1.2fr); }
   .auth-shell .auth-intro,

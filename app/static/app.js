@@ -198,7 +198,7 @@ $('#send-email-code').addEventListener('click', async () => {
 });
 
 function renderReferences() {
-  $('#reference-list').replaceChildren(...state.references.map((reference, index) => {
+  const previewItems = () => state.references.map((reference, index) => {
     const container = document.createElement('div'); container.className = 'reference-item';
     const image = document.createElement('img'); image.src = reference.url; image.alt = `参考图 ${index + 1}`;
     const number = document.createElement('span'); number.className = 'reference-number'; number.textContent = index + 1;
@@ -206,8 +206,12 @@ function renderReferences() {
     const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = '×'; remove.setAttribute('aria-label', `移除参考图 ${index + 1}`);
     remove.addEventListener('click', () => { URL.revokeObjectURL(reference.url); state.references = state.references.filter((item) => item.id !== reference.id); renderReferences(); });
     container.append(image, number, name, remove); return container;
-  }));
+  });
+  $('#reference-list').replaceChildren(...previewItems());
+  $('#reference-dialog-list').replaceChildren(...previewItems());
   $('#reference-count').textContent = `${state.references.length} / 8`;
+  $('#reference-dialog-count').textContent = `${state.references.length} / 8 张`;
+  $('#reference-dialog-done').textContent = state.references.length ? `完成，使用 ${state.references.length} 张参考图` : '完成，稍后添加';
   $('#clear-references').classList.toggle('is-hidden', !state.references.length);
   $('#generation-mode').textContent = state.references.length ? `图生图 · ${state.references.length} 张参考图` : '文字生图';
 }
@@ -223,20 +227,40 @@ async function addReferences(files) {
   state.references.push(...incoming.map((file) => ({ id: crypto.randomUUID(), file, url: URL.createObjectURL(file) })));
   renderReferences(); toast(`已添加 ${incoming.length} 张参考图`);
 }
-$('#reference-dropzone').addEventListener('click', () => { if (!state.busy) $('#reference-image').click(); });
-$('#reference-dropzone').addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); if (!state.busy) $('#reference-image').click(); } });
+function openReferenceDialog() {
+  if (state.busy) return toast('请等待当前生成完成后再修改参考图');
+  const dialog = $('#reference-dialog');
+  if (!dialog.open) dialog.showModal();
+  renderReferences();
+  $('#reference-paste-zone').focus();
+}
+function closeReferenceDialog() { $('#reference-dialog').close(); }
+$('#reference-dropzone').addEventListener('click', openReferenceDialog);
+$('#reference-dropzone').addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openReferenceDialog(); } });
 $('#reference-image').addEventListener('change', async (event) => { await addReferences(event.target.files); event.target.value = ''; });
 $('#clear-references').addEventListener('click', clearReferences);
+$('#reference-dialog-clear').addEventListener('click', clearReferences);
+$('#reference-dialog-close').addEventListener('click', closeReferenceDialog);
+$('#reference-dialog-done').addEventListener('click', closeReferenceDialog);
+$('#reference-dialog-upload').addEventListener('click', () => $('#reference-image').click());
+$('#reference-paste-zone').addEventListener('click', () => $('#reference-paste-zone').focus());
+$('#reference-dialog').addEventListener('click', (event) => { if (event.target === $('#reference-dialog')) closeReferenceDialog(); });
 const dropzone = $('#reference-dropzone');
 ['dragenter', 'dragover'].forEach((type) => dropzone.addEventListener(type, (event) => { event.preventDefault(); dropzone.classList.add('dragging'); }));
 ['dragleave', 'drop'].forEach((type) => dropzone.addEventListener(type, (event) => { event.preventDefault(); dropzone.classList.remove('dragging'); }));
 dropzone.addEventListener('drop', (event) => addReferences(event.dataTransfer.files));
+const pasteZone = $('#reference-paste-zone');
+['dragenter', 'dragover'].forEach((type) => pasteZone.addEventListener(type, (event) => { event.preventDefault(); pasteZone.classList.add('dragging'); }));
+['dragleave', 'drop'].forEach((type) => pasteZone.addEventListener(type, (event) => { event.preventDefault(); pasteZone.classList.remove('dragging'); }));
+pasteZone.addEventListener('drop', (event) => addReferences(event.dataTransfer.files));
 document.addEventListener('paste', (event) => {
   if (!state.user || $('#studio-panel').classList.contains('is-hidden')) return;
   const files = Array.from(event.clipboardData?.items || []).filter((item) => item.kind === 'file' && item.type.startsWith('image/')).map((item) => item.getAsFile()).filter(Boolean);
   if (files.length) { event.preventDefault(); addReferences(files); }
+  else if ($('#reference-dialog').open) { event.preventDefault(); toast('剪贴板里没有图片，请先复制图片', true); }
 });
-$('#paste-reference').addEventListener('click', async () => {
+$('#paste-reference').addEventListener('click', openReferenceDialog);
+$('#reference-dialog-read').addEventListener('click', async () => {
   if (!navigator.clipboard?.read) return toast('请复制图片后，按 Ctrl + V（Mac：⌘ + V）粘贴');
   try {
     const items = await navigator.clipboard.read(); const files = [];
