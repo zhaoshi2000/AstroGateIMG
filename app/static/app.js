@@ -17,10 +17,16 @@ const ideas = {
 const tagCategories = [
   ['scene', '场景'], ['character', '人物'], ['style', '风格'], ['commercial', '商业'], ['science', '科研'],
 ];
-const initialTags = ['云海古城', '樱花街道', '雨夜都市', '月光森林', '海边日落', '雪山晨曦', '星际港口', '水下宫殿', '沙漠绿洲', '空中花园', '未来地铁', '山间茶屋'];
+const defaultTags = {
+  scene: ['云海古城', '樱花街道', '雨夜都市', '月光森林', '海边日落', '雪山晨曦', '星际港口', '水下宫殿', '沙漠绿洲', '空中花园', '未来地铁', '山间茶屋'],
+  character: ['银发魔法师', '都市旅人', '花间少女', '机甲骑士', '猫耳店员', '森林精灵', '宇航员', '古风剑客', '赛博侦探', '海洋守护者', '龙族少年', '舞台歌手'],
+  style: ['电影感摄影', '精致动漫', '水彩绘本', '油画笔触', '黑白漫画', '黏土定格', '像素艺术', '复古海报', '极简设计', '梦幻插画', '赛博朋克', '蒸汽波'],
+  commercial: ['香水广告', '珠宝特写', '咖啡包装', '甜品陈列', '家具大片', '运动鞋海报', '护肤品静物', '潮玩展示', '汽车宣传', '时尚杂志', '花艺品牌', '耳机产品'],
+  science: ['纳米药物', '细胞成像', '蛋白结构', '宇宙星云', '气候地图', '植物解剖', '深海生态', '量子芯片', '人体骨骼', '太阳能电池', '脑神经网络', '材料晶格'],
+};
 let activeTagCategory = 'scene';
 let tagRequestId = 0;
-const tagCache = new Map([['scene', { tags: initialTags, source: 'fallback' }]]);
+const tagCache = new Map(Object.entries(defaultTags).map(([category, tags]) => [category, { tags, source: 'default' }]));
 const promptStyles = {
   none: '',
   anime: '动漫插画风格，细腻线条，柔和光影。',
@@ -282,9 +288,8 @@ function renderTagCategories() {
       if (id === activeTagCategory) return;
       activeTagCategory = id; renderTagCategories();
       const cached = tagCache.get(id);
-      if (cached) renderPromptTags(cached.tags);
-      else $('#inspiration-chips').replaceChildren();
-      loadPromptTags(id);
+      renderPromptTags(cached.tags);
+      $('#tag-hint').textContent = cached.source === 'ai' ? '这组标签由 AI 生成；点击可把完整提示词写入上方。' : '默认标签已就绪；点“换一批”可让 AI 生成新标签。';
     });
     return button;
   }));
@@ -293,7 +298,7 @@ function renderPromptTags(tags) {
   $('#inspiration-chips').replaceChildren(...tags.map((tag) => {
     const button = document.createElement('button'); button.type = 'button'; button.textContent = tag;
     button.addEventListener('click', async () => {
-      button.disabled = true;
+      button.disabled = true; button.classList.add('is-loading');
       $('#tag-hint').textContent = `正在为“${tag}”构思提示词…`;
       try {
         const category = tagCategories.find(([id]) => id === activeTagCategory)?.[1] || '场景';
@@ -304,18 +309,18 @@ function renderPromptTags(tags) {
         $('#assist-suggestion').classList.add('is-hidden');
         $('#tag-hint').textContent = result.source === 'fallback' ? '文字节点暂不可用，已将快速补全写入画面描述，可继续编辑。' : 'AI 提示词已写入画面描述，可继续编辑。';
       } catch (error) { $('#tag-hint').textContent = error.message; toast(error.message, true); }
-      finally { button.disabled = false; }
+      finally { button.disabled = false; button.classList.remove('is-loading'); }
     });
     return button;
   }));
 }
-async function loadPromptTags(category, refresh = false) {
+async function loadPromptTags(category) {
   const requestId = ++tagRequestId;
   const previous = tagCache.get(category)?.tags || [];
-  $('#refresh-tags').disabled = true;
+  $('#refresh-tags').disabled = true; $('#refresh-tags').classList.add('is-loading');
   $('#tag-hint').textContent = `正在准备${tagCategories.find(([id]) => id === category)?.[1] || ''}灵感标签…`;
   try {
-    const result = await api('/api/prompts/tags', { method: 'POST', body: JSON.stringify({ category, exclude: refresh ? previous : [] }) });
+    const result = await api('/api/prompts/tags', { method: 'POST', body: JSON.stringify({ category, exclude: previous }) });
     if (!Array.isArray(result.tags) || result.tags.length < 10) throw new Error('标签暂时无法更新');
     tagCache.set(category, result);
     if (requestId === tagRequestId && category === activeTagCategory) {
@@ -323,17 +328,17 @@ async function loadPromptTags(category, refresh = false) {
       $('#tag-hint').textContent = result.source === 'fallback' ? '文字节点暂不可用，现显示精选标签；点击后仍可快速补全提示词。' : '这组标签由 AI 生成；点击可把完整提示词写入上方。';
     }
   } catch (error) { if (requestId === tagRequestId) $('#tag-hint').textContent = `标签暂时无法更新：${error.message}`; }
-  finally { if (requestId === tagRequestId) $('#refresh-tags').disabled = false; }
+  finally { if (requestId === tagRequestId) { $('#refresh-tags').disabled = false; $('#refresh-tags').classList.remove('is-loading'); } }
 }
-$('#refresh-tags').addEventListener('click', () => loadPromptTags(activeTagCategory, true));
+$('#refresh-tags').addEventListener('click', () => loadPromptTags(activeTagCategory));
 renderTagCategories();
-renderPromptTags(initialTags);
+renderPromptTags(defaultTags.scene);
 
 $('#assist-prompt').addEventListener('click', async () => {
   const idea = $('#prompt').value.trim();
   if (idea.length < 2) return toast('先写下至少两个字的画面想法', true);
   if (idea.length > 1200) return toast('AI 帮写支持 1200 字以内的想法，请先精简描述', true);
-  const button = $('#assist-prompt'); button.disabled = true; button.textContent = '正在帮你构思…';
+  const button = $('#assist-prompt'); button.disabled = true; button.classList.add('is-loading'); button.textContent = '正在帮你构思…';
   $('#assist-hint').textContent = '正在生成提示词建议，请稍候。';
   try {
     const result = await api('/api/prompts/assist', { method: 'POST', body: JSON.stringify({ idea }) });
@@ -341,7 +346,7 @@ $('#assist-prompt').addEventListener('click', async () => {
     $('#assist-suggestion').classList.remove('is-hidden');
     $('#assist-hint').textContent = result.source === 'fallback' ? '文字节点暂不可用，已生成快速补全建议；采用后可继续修改。' : 'AI 建议已生成，采用后仍能继续修改。';
   } catch (error) { $('#assist-hint').textContent = error.message; toast(error.message, true); }
-  finally { button.disabled = false; button.textContent = '✧ AI 帮写提示词'; }
+  finally { button.disabled = false; button.classList.remove('is-loading'); button.textContent = '✧ AI 帮写提示词'; }
 });
 $('#apply-assist').addEventListener('click', () => {
   const suggestion = $('#assist-suggestion-text').textContent.trim();
@@ -433,7 +438,8 @@ $('#generation-form').addEventListener('submit', async (event) => {
   const model = selectedImageModel();
   if (!model.available) return toast('该模型尚未在图片节点开放，请选择可用模型', true);
   if (state.user.credits < model.credits_cost) { toast(`积分不足；${model.label} 每张需要 ${model.credits_cost} 积分`, true); return; }
-  state.busy = true; const button = $('#generate-button'); button.disabled = true; button.textContent = '✦ 正在创作，请稍候…';
+  state.busy = true; const button = $('#generate-button'); button.disabled = true; button.classList.add('is-loading'); button.textContent = '正在创作，请稍候…';
+  $('#generation-progress').classList.remove('is-hidden');
   $('#generation-status').textContent = `已预留 ${model.credits_cost} 积分。生成需要一些时间，请保持页面打开。`;
   $('#generation-empty').classList.add('generating');
   try {
@@ -445,7 +451,7 @@ $('#generation-form').addEventListener('submit', async (event) => {
     const spent = data.item.credits_cost ?? model.credits_cost;
     $('#generation-status').textContent = `作品已完成，本次消耗 ${spent} 积分。`; toast(`新作品已保存，消耗 ${spent} 积分`);
   } catch (error) { $('#generation-status').textContent = '生成未完成，请查看积分余额和明细后重试。'; toast(error.message, true); }
-  finally { state.busy = false; updateModelPrice(); button.textContent = '✦ 生成图像'; $('#generation-empty').classList.remove('generating'); try { await refreshUser(); } catch {} }
+  finally { state.busy = false; updateModelPrice(); button.classList.remove('is-loading'); button.textContent = '✦ 生成图像'; $('#generation-progress').classList.add('is-hidden'); $('#generation-empty').classList.remove('generating'); try { await refreshUser(); } catch {} }
 });
 
 async function loadWallet() {
@@ -473,7 +479,6 @@ $('#logout-button').addEventListener('click', async () => { if (state.busy) retu
     document.querySelector(`[data-route="${route}"]`).classList.add('active');
     $('#app-view').classList.remove('is-hidden'); $('#loading-view').classList.add('is-hidden');
     if (route === 'studio') {
-      loadPromptTags('scene');
       await loadImageModels();
       await loadHistory();
       try {

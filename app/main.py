@@ -770,7 +770,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not config.text_api_base or not config.text_api_key or not config.text_model or time.monotonic() < text_service_state["retry_at"]:
             return None
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(25, connect=7), transport=config.text_transport, trust_env=False) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(12, connect=5), transport=config.text_transport, trust_env=False) as client:
                 response = await client.post(
                     f"{config.text_api_base}/chat/completions",
                     headers={"Authorization": f"Bearer {config.text_api_key}"},

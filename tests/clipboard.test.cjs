@@ -20,6 +20,8 @@ class Element {
 }
 async function main() {
   const studioHtml = fs.readFileSync(path.join(__dirname, '../app/static/index.html'), 'utf8');
+  const studioCss = fs.readFileSync(path.join(__dirname, '../app/static/styles.css'), 'utf8');
+  assert.ok(studioCss.includes('.prompt-assistant .button.secondary,') && studioCss.includes('{background:#49367e;color:#fff;border-color:#8d70d9}'), 'Dark prompt button must have readable text on a dark background');
   const sizeOptions = studioHtml.match(/<select id="size">([\s\S]*?)<\/select>/)?.[1];
   assert.ok(sizeOptions, 'Studio must include aspect ratio options');
   const selectedSizes = [...sizeOptions.matchAll(/<option value="([^"]+)" selected>/g)].map((match) => match[1]);
@@ -162,13 +164,14 @@ async function main() {
   await vm.runInContext('loadImageModels()', context);
   assert.equal(elements.get('#inspiration-chips').children.length, 12, 'Default category shows twelve tags');
   elements.get('#tag-categories').children[1].events.click();
-  await new Promise(setImmediate);
-  assert.equal(elements.get('#inspiration-chips').children.length, 12, 'Switching categories fetches twelve new AI tags');
-  assert.match(elements.get('#inspiration-chips').children[0].textContent, /^character灵感/);
+  assert.equal(elements.get('#inspiration-chips').children.length, 12, 'Switching categories shows twelve default tags immediately');
+  assert.equal(elements.get('#inspiration-chips').children[0].textContent, '银发魔法师');
+  assert.equal(tagCalls, 0, 'Opening and switching categories must not wait for AI');
   await elements.get('#inspiration-chips').children[0].events.click();
   assert.equal(elements.get('#prompt').value, '月光下的古城，宽画幅，石墙与云海，柔和冷色调。', 'Tag click writes a complete prompt into the upper textarea');
   await elements.get('#refresh-tags').events.click();
-  assert.match(elements.get('#inspiration-chips').children[0].textContent, /^character灵感2-/, 'Refresh replaces the active group with fresh tags');
+  assert.equal(tagCalls, 1, 'Only pressing refresh asks AI for tags');
+  assert.match(elements.get('#inspiration-chips').children[0].textContent, /^character灵感1-/, 'Refresh replaces the active group with AI tags');
   assert.equal(elements.get('#image-model').children[1].disabled, false, 'Image 2.5 becomes selectable only when the image node reports it');
   assert.equal(elements.get('#image-model').children[2].disabled, true, 'Unlisted image variant remains disabled');
   elements.get('#prompt').value = '月光下的古城';
@@ -177,12 +180,40 @@ async function main() {
   assert.equal(elements.get('#prompt').value, '月光下的古城', 'AI must not silently overwrite the idea');
   elements.get('#apply-assist').events.click();
   assert.equal(elements.get('#prompt').value, '月光下的古城，宽画幅，石墙与云海，柔和冷色调。');
+  const readyFetch = context.fetch;
+  let finishAssist;
+  context.fetch = async (url) => {
+    if (url !== '/api/prompts/assist') throw new Error('Unexpected request: ' + url);
+    return new Promise((resolve) => { finishAssist = () => resolve({ ok: true, status: 200, json: async () => ({ prompt: '月光古城，清晰构图。', source: 'ai' }) }); });
+  };
+  const assisting = elements.get('#assist-prompt').events.click();
+  assert.equal(elements.get('#assist-prompt').classList.contains('is-loading'), true, 'Prompt button rotates while AI is writing');
+  finishAssist();
+  await assisting;
+  assert.equal(elements.get('#assist-prompt').classList.contains('is-loading'), false);
+  context.fetch = readyFetch;
   elements.get('#image-model').value = 'gpt-image-2.5-flare';
   elements.get('#image-model').dispatchEvent(new Event('change'));
   assert.match(elements.get('#generation-cost').textContent, /5 积分/);
   await elements.get('#generation-form').events.submit({ preventDefault() {} });
   assert.equal(submitted.model, 'gpt-image-2.5-flare', 'Selected paid model must reach the image API');
   assert.match(elements.get('#generation-status').textContent, /5 积分/);
+  vm.runInContext('setBalance(5)', context);
+  elements.get('#generation-progress').classList.add('is-hidden');
+  let finishGeneration;
+  context.fetch = async (url, options = {}) => {
+    if (url === '/api/images/generations') return new Promise((resolve) => { finishGeneration = () => resolve({ ok: true, status: 200, json: async () => ({ credits: 0, item: { id: historyId, image_src: historyImage, prompt: JSON.parse(options.body).prompt, model: 'gpt-image-2.5-flare', mode: 'text-to-image', size: '1536x864', credits_cost: 5, created_at: '2026-10-19T10:00:00Z' } }) }); });
+    if (url === '/api/auth/me') return { ok: true, status: 200, json: async () => ({ user: { username: 'artist', credits: 0, is_admin: false } }) };
+    throw new Error('Unexpected request: ' + url);
+  };
+  const generating = elements.get('#generation-form').events.submit({ preventDefault() {} });
+  assert.equal(elements.get('#generate-button').classList.contains('is-loading'), true, 'Image button rotates while generating');
+  assert.equal(elements.get('#generation-progress').classList.contains('is-hidden'), false, 'Image progress panel stays visible while generating');
+  await new Promise(setImmediate);
+  finishGeneration();
+  await generating;
+  assert.equal(elements.get('#generate-button').classList.contains('is-loading'), false);
+  assert.equal(elements.get('#generation-progress').classList.contains('is-hidden'), true);
   console.log('PASS: clipboard, prompt preview, AI suggestion, model availability, five-credit pricing, and default widescreen');
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; });
