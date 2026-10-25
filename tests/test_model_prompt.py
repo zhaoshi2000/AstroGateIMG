@@ -59,6 +59,7 @@ class ModelAndPromptTests(unittest.TestCase):
             self.register(client)
             models = {item["id"]: item for item in client.get("/api/images/models").json()["items"]}
             self.assertTrue(models["gpt-image-2"]["available"])
+            self.assertEqual(models["gpt-image-2"]["label"], "GPT Image 2.5 · 标准")
             self.assertEqual(models["gpt-image-2"]["credits_cost"], 1)
             self.assertFalse(models[IMAGE_25]["available"])
             self.assertEqual(models[IMAGE_25]["credits_cost"], 5)

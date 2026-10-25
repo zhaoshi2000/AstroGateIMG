@@ -1,6 +1,6 @@
 const $ = (selector) => document.querySelector(selector);
 const state = { user: null, mode: 'login', references: [], history: [], activeImageItem: null, busy: false, reading: false,
-  models: [{ id: 'gpt-image-2', label: 'GPT Image 2', available: true, credits_cost: 1, price_rmb: '0.05' },
+  models: [{ id: 'gpt-image-2', label: 'GPT Image 2.5 · 标准', available: true, credits_cost: 1, price_rmb: '0.05' },
     { id: 'gpt-image-2.5-flare', label: 'GPT Image 2.5 Flare', available: false, credits_cost: 5, price_rmb: '0.25' },
     { id: 'gpt-image-2.5-sunburst', label: 'GPT Image 2.5 Sunburst', available: false, credits_cost: 5, price_rmb: '0.25' }] };
 if (['/studio', '/wallet'].includes(location.pathname)) {
@@ -38,6 +38,18 @@ const promptStyles = {
   gouache: '厚涂数字插画风格，层次丰富的笔触与柔和体积光。',
   pencil: '彩铅手绘风格，细腻排线与纸张纹理，温柔配色。',
   pixel: '像素艺术风格，清晰像素边缘与有限色板。',
+  ukiyoe: '浮世绘版画风格，平面色块、流畅轮廓与传统木版套色。',
+  artnouveau: '新艺术运动插画风格，植物曲线、装饰边框与优雅配色。',
+  artdeco: '装饰艺术风格，对称几何、金属点缀与复古奢华质感。',
+  childrens: '儿童绘本风格，亲切的角色造型与明快柔和的色彩。',
+  pastel: '粉彩画风格，柔软笔触、低饱和色调与细腻纸面肌理。',
+  chalk: '粉笔画风格，可见颗粒与手绘线条，温暖自然。',
+  woodcut: '木刻版画风格，粗细分明的刻线与强烈黑白对比。',
+  stainedglass: '彩色玻璃艺术风格，铅线分割、透光色块与装饰图案。',
+  fresco: '壁画风格，矿物颜料色彩、古朴肌理与宏大构图。',
+  tapestry: '挂毯织物艺术风格，编织纹理、图案化造型与温暖配色。',
+  origami: '折纸艺术风格，清楚的折面、几何轮廓与纸张质感。',
+  lineart: '极简线描风格，干净连续的线条与克制留白。',
   photo: '写实摄影风格，自然材质与真实光线。',
   cinematic: '电影剧照风格，戏剧性布光与景深，叙事感构图。',
   film: '复古胶片摄影风格，细腻颗粒与柔和色彩，真实光影。',
@@ -45,18 +57,46 @@ const promptStyles = {
   product: '商业产品摄影风格，干净背景，精确布光与材质细节。',
   macro: '微距摄影风格，主体细节锐利，浅景深与柔和背景。',
   architecture: '建筑摄影风格，准确透视与空间尺度，自然光线。',
+  documentary: '纪实摄影风格，自然瞬间、真实环境与克制后期。',
+  street: '街头摄影风格，抓拍感、城市纹理与富有故事的光影。',
+  fashion: '时尚大片摄影风格，鲜明造型、精致布光与杂志构图。',
+  aerial: '航拍摄影风格，俯瞰视角、清晰地貌与有节奏的构图。',
+  underwater: '水下摄影风格，水体折射、漂浮颗粒与层次分明的蓝绿色。',
+  food: '美食摄影风格，诱人的食物质感、自然侧光与精心摆盘。',
+  night: '夜景摄影风格，城市灯光、真实高光与沉稳暗部。',
+  blackwhite: '黑白摄影风格，丰富灰阶、清晰光比与经典构图。',
+  polaroid: '拍立得摄影风格，柔和闪光、微妙褪色与即拍即得的生活感。',
   minimal: '极简视觉设计，明确视觉中心、克制配色与充足留白。',
   poster: '复古海报设计风格，醒目的图形构成与印刷质感。',
   render3d: '精致三维渲染风格，可信材质与柔和全局光照。',
   isometric: '等距视角插画风格，整齐结构、清晰层级与精巧细节。',
   paper: '纸雕艺术风格，分层纸张边缘与柔和投影。',
   clay: '黏土定格动画风格，手工塑形质感与温暖布光。',
+  flat: '扁平插画风格，简洁形状、清晰配色与易读层级。',
+  vector: '矢量插画风格，利落曲线、纯净色块与清晰边缘。',
+  lowpoly: '低多边形三维风格，简化几何切面与明确色面。',
+  brutalist: '粗野主义平面设计风格，强烈字形、大胆网格与高对比。',
+  gradient: '渐变流体艺术风格，平滑色彩过渡与柔和有机轮廓。',
+  geometric: '几何抽象风格，重复形状、秩序感与鲜明色彩关系。',
+  typography: '字体海报设计风格，以文字排版为视觉中心，层级清楚。',
+  holographic: '全息材质风格，彩虹色反射、半透明层次与未来感。',
+  infographic: '信息图表风格，清晰分区、符号化图形与易读视觉层级。',
+  blueprint: '工程蓝图风格，深蓝底色、精细白色线稿与结构标注。',
   fantasy: '奇幻插画风格，丰富层次与史诗氛围。',
   cyber: '赛博朋克风格，霓虹光影与未来都市氛围。',
   steampunk: '蒸汽朋克风格，黄铜机械细节与维多利亚时代氛围。',
   scifi: '科幻概念设计风格，可信的未来科技结构与电影感光影。',
   science: '科学图解风格，清晰布局与易辨认的视觉层级。',
   furry: '兽人角色插画风格，重视角色表情与毛发质感。',
+  darkfantasy: '黑暗奇幻风格，幽暗氛围、古老遗迹与戏剧性光影。',
+  fairytale: '童话幻想风格，温柔魔法细节与梦幻色彩。',
+  solarpunk: '太阳朋克风格，绿色建筑、清洁能源与明亮未来城市。',
+  retrofuture: '复古未来主义风格，旧时代科技想象与流线型设计。',
+  vaporwave: '蒸汽波风格，粉紫渐变、复古电子视觉与超现实空间。',
+  gothic: '哥特艺术风格，尖拱建筑、深色调与神秘装饰。',
+  surreal: '超现实主义风格，梦境般的物体组合与出人意料的空间关系。',
+  cosmic: '宇宙幻想风格，宏大星云、发光天体与深邃空间层次。',
+  ancient: '古文明幻想风格，遗迹纹饰、史诗场景与神秘氛围。',
 };
 
 class ApiError extends Error { constructor(message, status, retryAfter = 0) { super(message); this.status = status; this.retryAfter = retryAfter; } }
@@ -94,7 +134,7 @@ function updateModelPrice() {
   $('#generation-cost').textContent = `${model.credits_cost} 积分 / 张 · ¥${model.price_rmb}`;
   $('#current-model-label').textContent = `当前模型 · ${model.label}`;
   $('#model-availability').textContent = model.available
-    ? `已开放 · ${model.credits_cost} 积分 / 张 · ¥${model.price_rmb}`
+    ? `${model.id === 'gpt-image-2' ? '沿用原 Image 2 图片通道 · ' : ''}${model.credits_cost} 积分 / 张 · ¥${model.price_rmb}`
     : `${model.label} 暂不可用，请选择已开放模型。`;
   $('#generate-button').disabled = !model.available || state.busy;
 }
@@ -414,7 +454,7 @@ function showResult(item) {
   $('#result-image').src = src; $('#result-full').href = src; $('#download-result').href = src;
   $('#result-prompt').textContent = item.prompt;
   $('#share-result').href = '/?compose=1&image=' + encodeURIComponent(item.id);
-  const modelName = state.models.find((model) => model.id === item.model)?.label || item.model || 'GPT Image 2';
+  const modelName = state.models.find((model) => model.id === item.model)?.label || item.model || 'GPT Image 2.5 · 标准';
   $('#result-meta').replaceChildren(...[item.mode === 'image-to-image' ? `图生图 · ${item.reference_count || 1} 张参考图` : '文生图', modelName, item.size, `${item.credits_cost ?? 1} 积分`].map((value) => { const el = document.createElement('span'); el.textContent = value; return el; }));
 }
 $('#zoom-result').addEventListener('click', () => {

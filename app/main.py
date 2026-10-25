@@ -40,7 +40,7 @@ MAX_IMAGE_BYTES = 50 * 1024 * 1024
 MAX_REFERENCES = 8
 PASSWORD_ITERATIONS = 600_000
 IMAGE_MODELS = (
-    {"id": "gpt-image-2", "label": "GPT Image 2", "credits_cost": 1, "price_rmb": "0.05"},
+    {"id": "gpt-image-2", "label": "GPT Image 2.5 · 标准", "credits_cost": 1, "price_rmb": "0.05"},
     {"id": "gpt-image-2.5-flare", "label": "GPT Image 2.5 Flare", "credits_cost": 5, "price_rmb": "0.25"},
     {"id": "gpt-image-2.5-sunburst", "label": "GPT Image 2.5 Sunburst", "credits_cost": 5, "price_rmb": "0.25"},
 )

@@ -28,7 +28,9 @@ async function main() {
   assert.deepEqual(selectedSizes, ['1536x864'], 'A new creation defaults to 16:9 widescreen');
   const styleOptions = studioHtml.match(/<select id="prompt-style">([\s\S]*?)<\/select>/)?.[1];
   assert.ok(styleOptions, 'Style selection must stay in the primary composer');
-  assert.ok([...styleOptions.matchAll(/<option value=/g)].length >= 25, 'Offer a useful range of styles');
+  const styleValues = [...styleOptions.matchAll(/<option value="([^"]+)"/g)].map((match) => match[1]);
+  assert.ok(styleValues.length >= 51 && styleValues.length <= 81, 'Offer 50 to 80 selectable styles plus the no-style option');
+  assert.equal(new Set(styleValues).size, styleValues.length, 'Style values must be unique');
   assert.match(styleOptions, /<optgroup label="摄影与影视">/, 'Group the expanded styles');
   assert.match(studioHtml, /<details id="tag-panel" class="tag-panel">/, 'Inspiration tags start collapsed');
   assert.match(studioHtml, /<details id="prompt-settings" class="prompt-settings">/, 'Advanced controls start collapsed');
@@ -55,6 +57,8 @@ async function main() {
     fetch: async (url) => ({ ok: true, status: 200, json: async () => url === '/api/auth/me' ? { user: { username: 'artist', credits: 2, is_admin: false } } : { items: [] } }),
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../app/static/app.js'), 'utf8'), context);
+  const styleKeys = vm.runInContext('Object.keys(promptStyles)', context);
+  assert.deepEqual(styleValues.slice().sort(), Array.from(styleKeys).sort(), 'Every visible style must have a prompt modifier');
   await new Promise(setImmediate);
   assert.equal(document.body.classList.contains('studio-theme'), true, 'Studio must use its dedicated dark workspace theme');
   assert.equal(elements.get('#prompt').value, 'Showcase prompt carried into the studio');
@@ -171,7 +175,7 @@ async function main() {
   let tagCalls = 0;
   context.fetch = async (url, options = {}) => {
     if (url === '/api/images/models') return { ok: true, status: 200, json: async () => ({ items: [
-      { id: 'gpt-image-2', label: 'GPT Image 2', available: true, credits_cost: 1, price_rmb: '0.05' },
+      { id: 'gpt-image-2', label: 'GPT Image 2.5 · 标准', available: true, credits_cost: 1, price_rmb: '0.05' },
       { id: 'gpt-image-2.5-flare', label: 'GPT Image 2.5 Flare', available: true, credits_cost: 5, price_rmb: '0.25' },
       { id: 'gpt-image-2.5-sunburst', label: 'GPT Image 2.5 Sunburst', available: false, credits_cost: 5, price_rmb: '0.25' },
     ] }) };
