@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+from decimal import Decimal, InvalidOperation
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
@@ -19,7 +20,7 @@ import sqlite3
 from threading import Lock
 import time
 from typing import Annotated, Any, Callable, Literal
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 
 import httpx
 from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Request, Response
@@ -53,6 +54,7 @@ PROMPT_TAGS = {
 }
 PRICE = {"credits_per_image": 1, "rmb_per_image": "0.05", "rmb_per_credit": "0.05",
          "models": {item["id"]: {"credits_cost": item["credits_cost"], "price_rmb": item["price_rmb"]} for item in IMAGE_MODELS}}
+PAYMENT_TIERS = {1: 20, 5: 120, 10: 300}
 GALLERY_POSTS = json.loads((ROOT_DIR / "app/gallery_catalog.json").read_text(encoding="utf-8"))
 GALLERY_BY_ID = {post["id"]: post for post in GALLERY_POSTS}
 
@@ -94,6 +96,9 @@ class Settings:
     text_transport: httpx.AsyncBaseTransport | None = None
     gateway_bridge_key: str = ""
     gateway_public_origin: str = "https://img.astrogate.sbs"
+    payment_api_base: str = "https://pay.1kexiu.xyz"
+    payment_pid: str = ""
+    payment_key: str = ""
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -118,6 +123,9 @@ class Settings:
             text_model=os.getenv("ASTROGATE_TEXT_MODEL", "gpt-5.6-luna").strip(),
             gateway_bridge_key=os.getenv("ASTROGATE_GATEWAY_BRIDGE_KEY", "").strip(),
             gateway_public_origin=os.getenv("ASTROGATE_GATEWAY_PUBLIC_ORIGIN", "https://img.astrogate.sbs").strip(),
+            payment_api_base=os.getenv("ASTROGATE_PAYMENT_API_BASE", "https://pay.1kexiu.xyz").strip().rstrip("/"),
+            payment_pid=os.getenv("ASTROGATE_PAYMENT_PID", "").strip(),
+            payment_key=os.getenv("ASTROGATE_PAYMENT_KEY", "").strip(),
         )
 
 
@@ -235,6 +243,10 @@ class RedeemRequest(BaseModel):
     code: str = Field(min_length=8, max_length=120)
 
 
+class PaymentOrderRequest(BaseModel):
+    tier: Literal[1, 5, 10]
+
+
 class CreditAdjustment(BaseModel):
     amount: int = Field(ge=-1_000_000, le=1_000_000)
     reason: str = Field(default="管理员调整", min_length=1, max_length=160)
@@ -293,6 +305,21 @@ def ledger_entry(db, user_id: int, amount: int, kind: str, description: str, ope
     return balance
 
 
+def easy_pay_sign(fields: dict[str, str], key: str) -> str:
+    source = "&".join(f"{name}={value}" for name, value in sorted(fields.items())
+                      if name not in {"sign", "sign_type"} and value)
+    return hashlib.md5((source + key).encode("utf-8")).hexdigest()
+
+
+def payment_amount_cents(value: str) -> int | None:
+    try:
+        amount = Decimal(value)
+        cents = amount * 100
+        return int(cents) if amount.is_finite() and cents == cents.to_integral_value() and cents > 0 else None
+    except (InvalidOperation, ValueError):
+        return None
+
+
 def initialize_database(path: Path, settings: Settings) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with database_connection(path) as db:
@@ -324,6 +351,14 @@ def initialize_database(path: Path, settings: Settings) -> None:
                 credits INTEGER NOT NULL, created_by INTEGER NOT NULL REFERENCES users(id),
                 created_at TEXT NOT NULL, expires_at TEXT NOT NULL, redeemed_by INTEGER REFERENCES users(id), redeemed_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS payment_orders (
+                id TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id),
+                amount_cents INTEGER NOT NULL CHECK(amount_cents IN (100, 500, 1000)),
+                credits INTEGER NOT NULL CHECK(credits > 0),
+                status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'paid')),
+                platform_trade_no TEXT UNIQUE, created_at TEXT NOT NULL, paid_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS payment_orders_by_user ON payment_orders(user_id, created_at DESC);
             CREATE TABLE IF NOT EXISTS generation_jobs (
                 id TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), request_key TEXT NOT NULL,
                 fingerprint TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, error_message TEXT,
@@ -993,7 +1028,88 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def wallet(user=Depends(current_user)):
         with database_connection(database_path) as db:
             rows = db.execute("SELECT amount, balance_after, kind, description, created_at FROM credit_ledger WHERE user_id = ? ORDER BY id DESC LIMIT 100", (user["id"],)).fetchall()
-        return {"credits": user["credits"], "pricing": PRICE, "ledger": [dict(row) for row in rows]}
+            orders = db.execute("SELECT id, amount_cents, credits, status, created_at, paid_at FROM payment_orders WHERE user_id = ? ORDER BY created_at DESC LIMIT 20", (user["id"],)).fetchall()
+        return {"credits": user["credits"], "pricing": PRICE, "ledger": [dict(row) for row in rows],
+                "payment_enabled": bool(config.payment_pid and config.payment_key),
+                "payment_tiers": [{"yuan": yuan, "credits": credits} for yuan, credits in PAYMENT_TIERS.items()],
+                "payment_orders": [dict(row) for row in orders]}
+
+    @app.post("/api/payments/orders", status_code=201)
+    def create_payment_order(body: PaymentOrderRequest, request: Request, user=Depends(current_user)):
+        if not config.payment_pid or not config.payment_key:
+            raise HTTPException(503, "支付宝充值暂未开放")
+        payment_url = urlparse(config.payment_api_base)
+        public_url = urlparse(config.gateway_public_origin)
+        if payment_url.scheme != "https" or not payment_url.netloc or payment_url.username or payment_url.password or payment_url.query or payment_url.fragment or public_url.scheme != "https" or not public_url.netloc:
+            raise HTTPException(503, "支付配置无效")
+        rate_limit(request, "payment-order", 30, 3600)
+        rate_limit_user(user["id"], "payment-order", 10, 3600)
+        order_id = "AGI" + secrets.token_hex(12).upper()
+        credits = PAYMENT_TIERS[body.tier]
+        with database_connection(database_path) as db:
+            db.execute("INSERT INTO payment_orders (id, user_id, amount_cents, credits, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)",
+                       (order_id, user["id"], body.tier * 100, credits, now_iso()))
+        origin = config.gateway_public_origin.rstrip("/")
+        fields = {"pid": config.payment_pid, "type": "alipay", "out_trade_no": order_id,
+                  "notify_url": origin + "/api/payments/notify", "return_url": origin + "/wallet?order=" + order_id,
+                  "name": f"AstroGate IMG {credits}积分", "money": f"{body.tier:.2f}", "sitename": "AstroGate IMG"}
+        fields["sign"] = easy_pay_sign(fields, config.payment_key)
+        fields["sign_type"] = "MD5"
+        return {"id": order_id, "credits": credits, "amount_cents": body.tier * 100,
+                "action_url": config.payment_api_base + "/submit.php", "fields": fields}
+
+    @app.get("/api/payments/orders/{order_id}")
+    def get_payment_order(order_id: str, user=Depends(current_user)):
+        with database_connection(database_path) as db:
+            row = db.execute("SELECT id, amount_cents, credits, status, created_at, paid_at FROM payment_orders WHERE id = ? AND user_id = ?", (order_id, user["id"])).fetchone()
+        if not row:
+            raise HTTPException(404, "订单不存在")
+        return dict(row)
+
+    @app.api_route("/api/payments/notify", methods=["GET", "POST"])
+    async def payment_notify(request: Request):
+        if not config.payment_pid or not config.payment_key:
+            raise HTTPException(503, "支付配置无效")
+        if request.method == "POST":
+            raw = await request.body()
+            if len(raw) > 4096:
+                raise HTTPException(400, "回调数据无效")
+            try:
+                pairs = parse_qsl(raw.decode("utf-8"), keep_blank_values=True, strict_parsing=True)
+            except (UnicodeError, ValueError) as exc:
+                raise HTTPException(400, "回调数据无效") from exc
+        else:
+            pairs = list(request.query_params.multi_items())
+        if len(pairs) > 30 or len({name for name, _ in pairs}) != len(pairs):
+            raise HTTPException(400, "回调参数无效")
+        fields = dict(pairs)
+        signature = fields.get("sign", "")
+        if (fields.get("sign_type", "").upper() != "MD5" or not re.fullmatch(r"[0-9a-fA-F]{32}", signature)
+                or not hmac.compare_digest(easy_pay_sign(fields, config.payment_key), signature.lower())):
+            raise HTTPException(400, "回调签名无效")
+        if fields.get("pid") != config.payment_pid or fields.get("type") != "alipay" or fields.get("trade_status") != "TRADE_SUCCESS":
+            raise HTTPException(400, "回调状态无效")
+        order_id = fields.get("out_trade_no", "")
+        trade_no = fields.get("trade_no", "")
+        cents = payment_amount_cents(fields.get("money", ""))
+        if not re.fullmatch(r"AGI[0-9A-F]{24}", order_id) or not 1 <= len(trade_no) <= 128 or cents is None:
+            raise HTTPException(400, "回调订单无效")
+        with database_connection(database_path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM payment_orders WHERE id = ?", (order_id,)).fetchone()
+            if not row or row["amount_cents"] != cents or row["credits"] != PAYMENT_TIERS.get(cents // 100):
+                raise HTTPException(400, "回调金额无效")
+            if row["status"] == "paid":
+                if row["platform_trade_no"] != trade_no:
+                    raise HTTPException(400, "订单交易号不一致")
+            else:
+                if db.execute("SELECT 1 FROM payment_orders WHERE platform_trade_no = ?", (trade_no,)).fetchone():
+                    raise HTTPException(400, "交易号已使用")
+                db.execute("UPDATE payment_orders SET status = 'paid', platform_trade_no = ?, paid_at = ? WHERE id = ?",
+                           (trade_no, now_iso(), order_id))
+                db.execute("UPDATE users SET credits = credits + ? WHERE id = ?", (row["credits"], row["user_id"]))
+                ledger_entry(db, row["user_id"], row["credits"], "payment", f"支付宝充值 ¥{cents / 100:.2f}", f"payment:{order_id}")
+        return Response(content="success", media_type="text/plain")
 
     @app.post("/api/wallet/redeem")
     def redeem(body: RedeemRequest, request: Request, user=Depends(current_user)):

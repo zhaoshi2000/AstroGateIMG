@@ -458,6 +458,42 @@ async function loadWallet() {
   const data = await api('/api/wallet'); setBalance(data.credits);
   $('#ledger-table').replaceChildren(...data.ledger.map((item) => { const tr = document.createElement('tr'); tr.append(cell(date(item.created_at)), cell(item.description), cell(`${item.amount > 0 ? '+' : ''}${item.amount}`, item.amount > 0 ? 'positive' : 'negative'), cell(item.balance_after)); return tr; }));
   $('#ledger-empty').classList.toggle('is-hidden', !!data.ledger.length);
+  document.querySelectorAll('[data-payment-tier]').forEach((button) => { button.disabled = !data.payment_enabled; });
+  if (!data.payment_enabled) $('#payment-status').textContent = '支付宝充值暂未开放，请使用兑换码充值。';
+  $('#payment-orders').replaceChildren(...(data.payment_orders || []).map((item) => {
+    const row = document.createElement('div'); row.className = 'payment-order';
+    const summary = document.createElement('span'); summary.textContent = `¥${(item.amount_cents / 100).toFixed(2)} · ${item.credits} 积分 · ${date(item.created_at)}`;
+    const status = document.createElement('b'); status.className = item.status === 'paid' ? 'positive' : 'pending';
+    status.textContent = item.status === 'paid' ? '已到账' : '待支付'; row.append(summary, status); return row;
+  }));
+  if (!data.payment_orders?.length) $('#payment-orders').textContent = '暂无充值订单';
+}
+document.querySelectorAll('[data-payment-tier]').forEach((button) => button.addEventListener('click', async () => {
+  button.disabled = true; $('#payment-status').textContent = '正在创建支付宝订单…';
+  try {
+    const order = await api('/api/payments/orders', { method: 'POST', body: JSON.stringify({ tier: Number(button.dataset.paymentTier) }) });
+    const form = document.createElement('form'); form.method = 'POST'; form.action = order.action_url;
+    for (const [name, value] of Object.entries(order.fields)) {
+      const input = document.createElement('input'); input.type = 'hidden'; input.name = name; input.value = value; form.append(input);
+    }
+    document.body.append(form); $('#payment-status').textContent = '正在跳转支付宝收银台…'; form.submit();
+  } catch (error) { $('#payment-status').textContent = '创建订单失败，请稍后重试。'; toast(error.message, true); button.disabled = false; }
+}));
+$('#refresh-payments').addEventListener('click', async () => {
+  try { await loadWallet(); toast('订单状态已刷新'); } catch (error) { toast(error.message, true); }
+});
+async function watchReturnedPayment() {
+  const orderId = new URLSearchParams(location.search).get('order');
+  if (!/^AGI[0-9A-F]{24}$/.test(orderId || '')) return;
+  for (let attempt = 0; attempt < 12; attempt++) {
+    try {
+      const order = await api(`/api/payments/orders/${orderId}`);
+      if (order.status === 'paid') { $('#payment-status').textContent = `${order.credits} 积分已到账。`; await loadWallet(); toast(`充值成功，到账 ${order.credits} 积分`); return; }
+      $('#payment-status').textContent = '等待支付宝确认支付，确认后积分会自动到账。';
+    } catch (error) { $('#payment-status').textContent = error.message; return; }
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+  }
+  $('#payment-status').textContent = '尚未收到支付确认。可点击“刷新到账状态”再次查询。';
 }
 $('#redeem-form').addEventListener('submit', async (event) => {
   event.preventDefault(); const button = event.target.querySelector('button'); button.disabled = true;
@@ -494,7 +530,7 @@ $('#logout-button').addEventListener('click', async () => { if (state.busy) retu
       const idea = new URLSearchParams(location.search).get('idea'); if (ideas[idea]) { $('#prompt').value = ideas[idea]; $('#prompt').dispatchEvent(new Event('input')); }
       if (location.hash === '#history') $('#history').scrollIntoView();
     }
-    if (route === 'wallet') await loadWallet();
+    if (route === 'wallet') { await loadWallet(); void watchReturnedPayment(); }
   } catch (error) {
     if (error.status === 401) { $('#loading-view').classList.add('is-hidden'); $('#auth-view').classList.remove('is-hidden'); authMode(location.pathname === '/register' ? 'register' : 'login'); }
     else { $('#loading-view span').textContent = '暂时无法加载，请刷新页面重试。'; toast(error.message, true); }

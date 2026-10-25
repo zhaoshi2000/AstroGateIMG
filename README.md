@@ -67,7 +67,7 @@ ASTROGATE_SMTP_SENDER=noreply@astrogate.sbs
 | `/` | 作品社区、分类搜索、作者署名、参考提示词、点赞和评论 |
 | `/register`、`/login` | 邮箱验证码注册、邮箱或已有账号登录 |
 | `/studio` | 图片创作和个人作品库 |
-| `/wallet` | 积分余额、兑换码充值、积分流水 |
+| `/wallet` | 积分余额、支付宝或兑换码充值、充值订单与积分流水 |
 | `/admin`、`/admin/login` | 独立的管理员登录与运营概览 |
 | `/admin/accounts` | 上游账号池、剩余图片额度与上游刷新 |
 | `/admin/users`、`/admin/codes` | 用户积分调整与兑换码管理 |
@@ -93,6 +93,8 @@ ASTROGATE_SMTP_SENDER=noreply@astrogate.sbs
 上游凭据只在服务端使用；管理页面接收的是白名单字段，不返回 access token、refresh token 或内部上游密钥。同一账号的多条凭据合并显示，汇总仅累计正常账号的剩余图片额度。页面每 30 秒读取一次当前额度，点击刷新按钮会启动上游实时查询并显示进度。
 
 管理员登录后打开 `/admin`，在“生成兑换码”中填写单码积分、数量和有效天数。完整兑换码只在创建时返回，请复制保存后交付给用户。用户在 `/wallet` 输入兑换码，积分立即到账。
+
+支付宝充值使用易支付 `submit.php` 页面跳转接口。在服务器 `.env` 配置 `ASTROGATE_PAYMENT_API_BASE`、`ASTROGATE_PAYMENT_PID`、`ASTROGATE_PAYMENT_KEY`，并设置 `ASTROGATE_GATEWAY_PUBLIC_ORIGIN` 为本站 HTTPS 公网地址；密钥不要提交到仓库。仅开放支付宝：¥1 到账 20 积分，¥5 到账 120 积分，¥10 到账 300 积分。订单金额和积分在服务端固定，只有校验签名、商户、渠道、金额和成功状态后的异步通知才会入账；支付返回页只查询状态，不自行加积分。重复通知不会重复入账。软件端监控密钥不用于网页支付。
 
 管理员也可以在用户列表直接加减积分，输入正数增加、负数扣减，调整会写入流水。删除作品不会退还已消耗积分。
 
