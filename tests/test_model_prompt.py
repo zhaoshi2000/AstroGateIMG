@@ -22,7 +22,7 @@ class ModelAndPromptTests(unittest.TestCase):
         self.image_calls = []
         self.text_calls = []
 
-    def app(self, models=("gpt-image-2",), credits=5, image_status=200):
+    def app(self, models=("gpt-image-2",), credits=5, image_status=200, text_status=200):
         def image_upstream(request):
             if request.method == "GET" and request.url.path.endswith("/models"):
                 return httpx.Response(200, json={"data": [{"id": model} for model in models]})
@@ -33,6 +33,10 @@ class ModelAndPromptTests(unittest.TestCase):
 
         def text_upstream(request):
             self.text_calls.append(request)
+            if text_status != 200:
+                return httpx.Response(text_status, json={"error": {"message": "text provider unavailable"}})
+            if "仅返回 JSON 字符串数组" in json.loads(request.content)["messages"][0]["content"]:
+                return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps([f"灵感主题{i}" for i in range(12)], ensure_ascii=False)}}]})
             return httpx.Response(200, json={"choices": [{"message": {"content": "星空下的古城，宽画幅构图，层次清晰，柔和月光。"}}]})
 
         return create_app(Settings(
@@ -109,3 +113,26 @@ class ModelAndPromptTests(unittest.TestCase):
             self.assertEqual(json.loads(self.text_calls[0].content)["model"], "gpt-5.6-luna")
             self.assertNotIn("text-secret", response.text)
             self.assertNotIn("text-secret", client.get("/studio").text)
+
+    def test_tags_are_ai_generated_and_assist_falls_back_when_text_node_fails(self):
+        with TestClient(self.app()) as client:
+            self.register(client)
+            response = client.post("/api/prompts/tags", json={"category": "scene"})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["source"], "ai")
+            self.assertEqual(len(response.json()["tags"]), 12)
+        self.text_calls.clear()
+        with TestClient(self.app(text_status=503)) as client:
+            self.assertEqual(client.post("/api/auth/login", json={"identifier": "artist@example.com", "password": PASSWORD}).status_code, 200)
+            response = client.post("/api/prompts/assist", json={"idea": "雨夜的未来城市"})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["source"], "fallback")
+            self.assertIn("雨夜的未来城市", response.json()["prompt"])
+            tags = client.post("/api/prompts/tags", json={"category": "character"})
+            self.assertEqual(tags.status_code, 200, tags.text)
+            self.assertEqual(tags.json()["source"], "fallback")
+            self.assertEqual(len(tags.json()["tags"]), 12)
+            switched = client.post("/api/prompts/tags", json={"category": "character", "exclude": tags.json()["tags"]})
+            self.assertEqual(switched.status_code, 200, switched.text)
+            self.assertGreaterEqual(len(set(switched.json()["tags"]) - set(tags.json()["tags"])), 8)
+            self.assertEqual(len(self.text_calls), 1, "A failing node must not delay each tag or prompt click")

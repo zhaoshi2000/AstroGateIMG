@@ -139,6 +139,7 @@ async function main() {
   assert.equal(submitted.size, '1536x864');
   assert.equal(elements.get('#result-prompt').textContent, composed);
   vm.runInContext('setBalance(5)', context);
+  let tagCalls = 0;
   context.fetch = async (url, options = {}) => {
     if (url === '/api/images/models') return { ok: true, status: 200, json: async () => ({ items: [
       { id: 'gpt-image-2', label: 'GPT Image 2', available: true, credits_cost: 1, price_rmb: '0.05' },
@@ -146,6 +147,11 @@ async function main() {
       { id: 'gpt-image-2.5-sunburst', label: 'GPT Image 2.5 Sunburst', available: false, credits_cost: 5, price_rmb: '0.25' },
     ] }) };
     if (url === '/api/prompts/assist') return { ok: true, status: 200, json: async () => ({ prompt: '月光下的古城，宽画幅，石墙与云海，柔和冷色调。' }) };
+    if (url === '/api/prompts/tags') {
+      tagCalls += 1;
+      const { category } = JSON.parse(options.body);
+      return { ok: true, status: 200, json: async () => ({ tags: Array.from({ length: 12 }, (_, i) => `${category}灵感${tagCalls}-${i}`), source: 'ai' }) };
+    }
     if (url === '/api/images/generations') {
       submitted = JSON.parse(options.body);
       return { ok: true, status: 200, json: async () => ({ credits: 0, item: { id: historyId, image_src: historyImage, prompt: submitted.prompt, model: submitted.model, mode: 'text-to-image', size: submitted.size, credits_cost: 5, created_at: '2026-10-19T10:00:00Z' } }) };
@@ -154,6 +160,15 @@ async function main() {
     throw new Error('Unexpected request: ' + url);
   };
   await vm.runInContext('loadImageModels()', context);
+  assert.equal(elements.get('#inspiration-chips').children.length, 12, 'Default category shows twelve tags');
+  elements.get('#tag-categories').children[1].events.click();
+  await new Promise(setImmediate);
+  assert.equal(elements.get('#inspiration-chips').children.length, 12, 'Switching categories fetches twelve new AI tags');
+  assert.match(elements.get('#inspiration-chips').children[0].textContent, /^character灵感/);
+  await elements.get('#inspiration-chips').children[0].events.click();
+  assert.equal(elements.get('#prompt').value, '月光下的古城，宽画幅，石墙与云海，柔和冷色调。', 'Tag click writes a complete prompt into the upper textarea');
+  await elements.get('#refresh-tags').events.click();
+  assert.match(elements.get('#inspiration-chips').children[0].textContent, /^character灵感2-/, 'Refresh replaces the active group with fresh tags');
   assert.equal(elements.get('#image-model').children[1].disabled, false, 'Image 2.5 becomes selectable only when the image node reports it');
   assert.equal(elements.get('#image-model').children[2].disabled, true, 'Unlisted image variant remains disabled');
   elements.get('#prompt').value = '月光下的古城';

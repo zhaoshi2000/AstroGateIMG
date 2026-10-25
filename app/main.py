@@ -44,6 +44,13 @@ IMAGE_MODELS = (
     {"id": "gpt-image-2.5-sunburst", "label": "GPT Image 2.5 Sunburst", "credits_cost": 5, "price_rmb": "0.25"},
 )
 IMAGE_MODEL_BY_ID = {item["id"]: item for item in IMAGE_MODELS}
+PROMPT_TAGS = {
+    "scene": ("云海古城", "樱花街道", "雨夜都市", "月光森林", "海边日落", "雪山晨曦", "星际港口", "水下宫殿", "沙漠绿洲", "空中花园", "未来地铁", "山间茶屋", "极光冰原", "雾中灯塔", "古风庭院", "森林小屋", "云端神殿", "海底遗迹", "雨后花园", "赛博街区"),
+    "character": ("银发魔法师", "都市旅人", "花间少女", "机甲骑士", "猫耳店员", "森林精灵", "宇航员", "古风剑客", "赛博侦探", "海洋守护者", "龙族少年", "舞台歌手", "蒸汽工匠", "白袍学者", "未来赛车手", "童话公主", "夜行侠客", "机械人偶", "雪国旅者", "咖啡馆主"),
+    "style": ("电影感摄影", "精致动漫", "水彩绘本", "油画笔触", "黑白漫画", "黏土定格", "像素艺术", "复古海报", "极简设计", "梦幻插画", "赛博朋克", "蒸汽波", "国风工笔", "低多边形", "纸雕艺术", "胶片摄影", "浮世绘", "3D 渲染", "铅笔素描", "童话绘本"),
+    "commercial": ("香水广告", "珠宝特写", "咖啡包装", "甜品陈列", "家具大片", "运动鞋海报", "护肤品静物", "潮玩展示", "汽车宣传", "时尚杂志", "花艺品牌", "耳机产品", "手表广告", "书店橱窗", "茶饮海报", "酒店空间", "家居用品", "美妆主视觉", "礼盒设计", "建筑概念"),
+    "science": ("纳米药物", "细胞成像", "蛋白结构", "宇宙星云", "气候地图", "植物解剖", "深海生态", "量子芯片", "人体骨骼", "太阳能电池", "脑神经网络", "材料晶格", "基因图谱", "显微世界", "火山剖面", "海洋洋流", "机械传动", "分子模型", "地质年代", "生物发光"),
+}
 PRICE = {"credits_per_image": 1, "rmb_per_image": "0.05", "rmb_per_credit": "0.05",
          "models": {item["id"]: {"credits_cost": item["credits_cost"], "price_rmb": item["price_rmb"]} for item in IMAGE_MODELS}}
 GALLERY_POSTS = json.loads((ROOT_DIR / "app/gallery_catalog.json").read_text(encoding="utf-8"))
@@ -180,6 +187,11 @@ class PromptAssistRequest(BaseModel):
         if len(value) < 2:
             raise ValueError("请先写一点画面想法")
         return value
+
+
+class PromptTagsRequest(BaseModel):
+    category: Literal["scene", "character", "style", "commercial", "science"]
+    exclude: list[str] = Field(default_factory=list, max_length=20)
 
 
 class CommunityLikeRequest(BaseModel):
@@ -752,31 +764,69 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def available_image_models():
         return {"items": await image_model_items()}
 
-    @app.post("/api/prompts/assist")
-    async def assist_prompt(body: PromptAssistRequest, user=Depends(current_user)):
-        if not config.text_api_base or not config.text_api_key or not config.text_model:
-            raise HTTPException(503, "提示词帮写暂未配置")
-        rate_limit_user(user["id"], "prompt-assist", 8, 600)
-        payload = {
-            "model": config.text_model,
-            "stream": False,
-            "messages": [
-                {"role": "system", "content": "你是图片创作提示词助手。根据用户的想法写一段可直接用于图像生成的中文提示词，明确主体、场景、构图、光线、色彩、氛围和细节；尊重用户的原意，不虚构画面上的文字，不写模型参数。只返回提示词正文，控制在 100 至 500 个汉字。"},
-                {"role": "user", "content": body.idea},
-            ],
-        }
+    text_service_state = {"retry_at": 0.0}
+
+    async def complete_text(messages: list[dict[str, str]]) -> str | None:
+        if not config.text_api_base or not config.text_api_key or not config.text_model or time.monotonic() < text_service_state["retry_at"]:
+            return None
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(35, connect=8), transport=config.text_transport, trust_env=False) as client:
-                response = await client.post(f"{config.text_api_base}/chat/completions", headers={"Authorization": f"Bearer {config.text_api_key}"}, json=payload)
+            async with httpx.AsyncClient(timeout=httpx.Timeout(25, connect=7), transport=config.text_transport, trust_env=False) as client:
+                response = await client.post(
+                    f"{config.text_api_base}/chat/completions",
+                    headers={"Authorization": f"Bearer {config.text_api_key}"},
+                    json={"model": config.text_model, "stream": False, "messages": messages},
+                )
                 response.raise_for_status()
                 data = response.json()
             choices = data.get("choices", []) if isinstance(data, dict) else []
-            prompt = choices[0].get("message", {}).get("content", "") if choices and isinstance(choices[0], dict) else ""
-            if not isinstance(prompt, str) or not prompt.strip():
-                raise ValueError("empty prompt")
-            return {"prompt": prompt.strip()[:4000]}
-        except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError) as exc:
-            raise HTTPException(502, "提示词暂时无法生成，请稍后重试") from exc
+            content = choices[0].get("message", {}).get("content", "") if choices and isinstance(choices[0], dict) else ""
+            if isinstance(content, str) and content.strip():
+                text_service_state["retry_at"] = 0.0
+                return content.strip()
+        except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError):
+            pass
+        text_service_state["retry_at"] = time.monotonic() + 90
+        return None
+
+    @app.post("/api/prompts/assist")
+    async def assist_prompt(body: PromptAssistRequest, user=Depends(current_user)):
+        rate_limit_user(user["id"], "prompt-assist", 30, 600)
+        prompt = await complete_text([
+            {"role": "system", "content": "你是图片创作提示词助手。根据用户想法写一段可直接用于图像生成的中文提示词，明确主体、场景、构图、光线、色彩、氛围和细节；尊重原意，不虚构画面文字，不写模型参数。只返回提示词正文，控制在 100 至 500 个汉字。"},
+            {"role": "user", "content": body.idea},
+        ])
+        if prompt:
+            return {"prompt": prompt[:4000], "source": "ai"}
+        idea = body.idea.strip().rstrip("，。；; ")
+        fallback = f"{idea}。主体清晰，画面重点突出；安排前景、中景与背景，构图自然完整，透视关系准确。使用与主题相符的光线和配色，呈现丰富而克制的材质细节、空间层次与氛围。保持画面干净、细节连贯，避免无关文字、水印和杂乱元素。"
+        return {"prompt": fallback[:4000], "source": "fallback"}
+
+    @app.post("/api/prompts/tags")
+    async def prompt_tags(body: PromptTagsRequest, user=Depends(current_user)):
+        rate_limit_user(user["id"], "prompt-tags", 20, 600)
+        category_names = {"scene": "场景", "character": "人物", "style": "风格", "commercial": "商业", "science": "科研"}
+        generated = await complete_text([
+            {"role": "system", "content": "你为图像创作提供灵感标签。仅返回 JSON 字符串数组，恰好 12 个简短中文标签，每个 2 至 12 字，具体、多样、不重复。不附加解释。"},
+            {"role": "user", "content": f"类别：{category_names[body.category]}。避开这些标签：{', '.join(body.exclude[:12])}。请给一组新标签。"},
+        ])
+        if generated:
+            try:
+                raw = generated.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+                tags = json.loads(raw)
+                if isinstance(tags, list):
+                    clean = list(dict.fromkeys(tag.strip() for tag in tags if isinstance(tag, str) and 2 <= len(tag.strip()) <= 12 and tag.strip() not in body.exclude))
+                    if len(clean) >= 10:
+                        return {"tags": clean[:12], "source": "ai"}
+            except (ValueError, TypeError):
+                pass
+        pool = list(PROMPT_TAGS[body.category])
+        fresh = [tag for tag in pool if tag not in body.exclude]
+        rng = secrets.SystemRandom()
+        tags = rng.sample(fresh, min(12, len(fresh)))
+        if len(tags) < 12:
+            tags.extend(rng.sample([tag for tag in pool if tag not in tags], 12 - len(tags)))
+        rng.shuffle(tags)
+        return {"tags": tags, "source": "fallback"}
 
     def code_digest(email: str, code: str) -> str:
         return hmac.new(verification_secret.encode(), f"register:{email}:{code}".encode(), hashlib.sha256).hexdigest()

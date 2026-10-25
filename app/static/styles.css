@@ -88,6 +88,17 @@ body.studio-theme #studio-panel .model-picker p{margin:7px 0 0;color:#abb1c8;fon
 body.studio-theme #studio-panel .prompt-assistant{display:flex;align-items:center;gap:11px;flex-wrap:wrap;margin:2px 0 5px}
 body.studio-theme #studio-panel .prompt-assistant button{font-size:11px;padding:9px 12px}
 body.studio-theme #studio-panel .prompt-assistant span{color:#aeb7d0;font-size:10px;line-height:1.5}
+body.studio-theme #studio-panel .tag-panel{background:#141b30;border:1px solid #333b56;border-radius:11px;padding:12px;display:grid;gap:10px}
+body.studio-theme #studio-panel .tag-panel-heading{display:flex;justify-content:space-between;align-items:center;gap:10px}
+body.studio-theme #studio-panel .tag-panel-heading strong{font-size:11px;color:#e4d8ff}
+body.studio-theme #studio-panel .tag-panel-heading button{font-size:10px;color:#bb9efa;padding:5px 7px}
+body.studio-theme #studio-panel .tag-categories{display:flex;gap:6px;flex-wrap:wrap}
+body.studio-theme #studio-panel .tag-categories button{border:1px solid #3c4561;background:#202942;color:#b8c2dc;border-radius:7px;padding:6px 10px;font-size:10px}
+body.studio-theme #studio-panel .tag-categories button.active{border-color:#9c7beb;background:#503989;color:#fff}
+body.studio-theme #studio-panel .tag-panel .inspiration-chips{margin:0;min-height:66px;align-content:start}
+body.studio-theme #studio-panel .tag-panel .inspiration-chips button{font-size:10px;padding:7px 10px}
+body.studio-theme #studio-panel .tag-panel .inspiration-chips button:disabled{opacity:.55;cursor:wait}
+body.studio-theme #studio-panel .tag-panel #tag-hint{margin:0;color:#aeb7d0;font-size:10px;line-height:1.5}
 body.studio-theme #studio-panel .assist-suggestion{background:#1d253a;border:1px solid #584a78;border-radius:9px;padding:13px;display:grid;gap:10px}
 body.studio-theme #studio-panel .assist-suggestion.is-hidden{display:none}
 body.studio-theme #studio-panel .assist-suggestion strong{color:#e7d7ff;font-size:11px}

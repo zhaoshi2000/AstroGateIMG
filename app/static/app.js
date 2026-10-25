@@ -14,6 +14,13 @@ const ideas = {
   space: '一座面朝海面的暖色拱门建筑，柔和的午后阳光，天然石材与细腻肌理，地中海风格，建筑摄影。',
   abstract: '漂浮的紫色玻璃球体与金属圆环，柔和光线，浅薰衣草色背景，抽象艺术，精致的材质细节。',
 };
+const tagCategories = [
+  ['scene', '场景'], ['character', '人物'], ['style', '风格'], ['commercial', '商业'], ['science', '科研'],
+];
+const initialTags = ['云海古城', '樱花街道', '雨夜都市', '月光森林', '海边日落', '雪山晨曦', '星际港口', '水下宫殿', '沙漠绿洲', '空中花园', '未来地铁', '山间茶屋'];
+let activeTagCategory = 'scene';
+let tagRequestId = 0;
+const tagCache = new Map([['scene', { tags: initialTags, source: 'fallback' }]]);
 const promptStyles = {
   none: '',
   anime: '动漫插画风格，细腻线条，柔和光影。',
@@ -266,7 +273,61 @@ $('#prompt').addEventListener('keydown', (event) => {
     if (!state.busy) $('#generation-form').requestSubmit();
   }
 });
-document.querySelectorAll('[data-idea]').forEach((button) => button.addEventListener('click', () => { $('#prompt').value = ideas[button.dataset.idea]; $('#prompt').dispatchEvent(new Event('input')); $('#prompt').focus(); }));
+function renderTagCategories() {
+  $('#tag-categories').replaceChildren(...tagCategories.map(([id, label]) => {
+    const button = document.createElement('button'); button.type = 'button'; button.textContent = label;
+    button.className = id === activeTagCategory ? 'active' : '';
+    button.setAttribute('aria-pressed', String(id === activeTagCategory));
+    button.addEventListener('click', () => {
+      if (id === activeTagCategory) return;
+      activeTagCategory = id; renderTagCategories();
+      const cached = tagCache.get(id);
+      if (cached) renderPromptTags(cached.tags);
+      else $('#inspiration-chips').replaceChildren();
+      loadPromptTags(id);
+    });
+    return button;
+  }));
+}
+function renderPromptTags(tags) {
+  $('#inspiration-chips').replaceChildren(...tags.map((tag) => {
+    const button = document.createElement('button'); button.type = 'button'; button.textContent = tag;
+    button.addEventListener('click', async () => {
+      button.disabled = true;
+      $('#tag-hint').textContent = `正在为“${tag}”构思提示词…`;
+      try {
+        const category = tagCategories.find(([id]) => id === activeTagCategory)?.[1] || '场景';
+        const result = await api('/api/prompts/assist', { method: 'POST', body: JSON.stringify({ idea: `${category}主题：${tag}` }) });
+        $('#prompt').value = result.prompt;
+        $('#prompt').dispatchEvent(new Event('input'));
+        $('#prompt').focus();
+        $('#assist-suggestion').classList.add('is-hidden');
+        $('#tag-hint').textContent = result.source === 'fallback' ? '文字节点暂不可用，已将快速补全写入画面描述，可继续编辑。' : 'AI 提示词已写入画面描述，可继续编辑。';
+      } catch (error) { $('#tag-hint').textContent = error.message; toast(error.message, true); }
+      finally { button.disabled = false; }
+    });
+    return button;
+  }));
+}
+async function loadPromptTags(category, refresh = false) {
+  const requestId = ++tagRequestId;
+  const previous = tagCache.get(category)?.tags || [];
+  $('#refresh-tags').disabled = true;
+  $('#tag-hint').textContent = `正在准备${tagCategories.find(([id]) => id === category)?.[1] || ''}灵感标签…`;
+  try {
+    const result = await api('/api/prompts/tags', { method: 'POST', body: JSON.stringify({ category, exclude: refresh ? previous : [] }) });
+    if (!Array.isArray(result.tags) || result.tags.length < 10) throw new Error('标签暂时无法更新');
+    tagCache.set(category, result);
+    if (requestId === tagRequestId && category === activeTagCategory) {
+      renderPromptTags(result.tags);
+      $('#tag-hint').textContent = result.source === 'fallback' ? '文字节点暂不可用，现显示精选标签；点击后仍可快速补全提示词。' : '这组标签由 AI 生成；点击可把完整提示词写入上方。';
+    }
+  } catch (error) { if (requestId === tagRequestId) $('#tag-hint').textContent = `标签暂时无法更新：${error.message}`; }
+  finally { if (requestId === tagRequestId) $('#refresh-tags').disabled = false; }
+}
+$('#refresh-tags').addEventListener('click', () => loadPromptTags(activeTagCategory, true));
+renderTagCategories();
+renderPromptTags(initialTags);
 
 $('#assist-prompt').addEventListener('click', async () => {
   const idea = $('#prompt').value.trim();
@@ -278,7 +339,7 @@ $('#assist-prompt').addEventListener('click', async () => {
     const result = await api('/api/prompts/assist', { method: 'POST', body: JSON.stringify({ idea }) });
     $('#assist-suggestion-text').textContent = result.prompt;
     $('#assist-suggestion').classList.remove('is-hidden');
-    $('#assist-hint').textContent = '可先查看建议，采用后仍能继续修改。';
+    $('#assist-hint').textContent = result.source === 'fallback' ? '文字节点暂不可用，已生成快速补全建议；采用后可继续修改。' : 'AI 建议已生成，采用后仍能继续修改。';
   } catch (error) { $('#assist-hint').textContent = error.message; toast(error.message, true); }
   finally { button.disabled = false; button.textContent = '✧ AI 帮写提示词'; }
 });
@@ -412,6 +473,7 @@ $('#logout-button').addEventListener('click', async () => { if (state.busy) retu
     document.querySelector(`[data-route="${route}"]`).classList.add('active');
     $('#app-view').classList.remove('is-hidden'); $('#loading-view').classList.add('is-hidden');
     if (route === 'studio') {
+      loadPromptTags('scene');
       await loadImageModels();
       await loadHistory();
       try {
