@@ -30,9 +30,31 @@ const tagCache = new Map(Object.entries(defaultTags).map(([category, tags]) => [
 const promptStyles = {
   none: '',
   anime: '动漫插画风格，细腻线条，柔和光影。',
+  watercolor: '水彩绘本风格，轻盈的色彩晕染与手绘纸张肌理。',
+  oil: '古典油画风格，厚实笔触，丰富的明暗与颜料质感。',
+  ink: '国风水墨画风格，浓淡墨色与自然留白，笔触流动。',
+  gongbi: '工笔细画风格，精细线描与典雅设色，细节清晰。',
+  comic: '黑白漫画风格，鲜明线稿与网点阴影，分镜感构图。',
+  gouache: '厚涂数字插画风格，层次丰富的笔触与柔和体积光。',
+  pencil: '彩铅手绘风格，细腻排线与纸张纹理，温柔配色。',
+  pixel: '像素艺术风格，清晰像素边缘与有限色板。',
   photo: '写实摄影风格，自然材质与真实光线。',
+  cinematic: '电影剧照风格，戏剧性布光与景深，叙事感构图。',
+  film: '复古胶片摄影风格，细腻颗粒与柔和色彩，真实光影。',
+  portrait: '人像写真风格，人物神态自然，柔和布光与细腻肤色。',
+  product: '商业产品摄影风格，干净背景，精确布光与材质细节。',
+  macro: '微距摄影风格，主体细节锐利，浅景深与柔和背景。',
+  architecture: '建筑摄影风格，准确透视与空间尺度，自然光线。',
+  minimal: '极简视觉设计，明确视觉中心、克制配色与充足留白。',
+  poster: '复古海报设计风格，醒目的图形构成与印刷质感。',
+  render3d: '精致三维渲染风格，可信材质与柔和全局光照。',
+  isometric: '等距视角插画风格，整齐结构、清晰层级与精巧细节。',
+  paper: '纸雕艺术风格，分层纸张边缘与柔和投影。',
+  clay: '黏土定格动画风格，手工塑形质感与温暖布光。',
   fantasy: '奇幻插画风格，丰富层次与史诗氛围。',
   cyber: '赛博朋克风格，霓虹光影与未来都市氛围。',
+  steampunk: '蒸汽朋克风格，黄铜机械细节与维多利亚时代氛围。',
+  scifi: '科幻概念设计风格，可信的未来科技结构与电影感光影。',
   science: '科学图解风格，清晰布局与易辨认的视觉层级。',
   furry: '兽人角色插画风格，重视角色表情与毛发质感。',
 };
@@ -72,8 +94,8 @@ function updateModelPrice() {
   $('#generation-cost').textContent = `${model.credits_cost} 积分 / 张 · ¥${model.price_rmb}`;
   $('#current-model-label').textContent = `当前模型 · ${model.label}`;
   $('#model-availability').textContent = model.available
-    ? `${model.label} 已开放，每张 ${model.credits_cost} 积分（¥${model.price_rmb}）。2.5 是否可用以图片节点为准。`
-    : `${model.label} 尚未在图片节点开放；可先使用 GPT Image 2。`;
+    ? `已开放 · ${model.credits_cost} 积分 / 张 · ¥${model.price_rmb}`
+    : `${model.label} 暂不可用，请选择已开放模型。`;
   $('#generate-button').disabled = !model.available || state.busy;
 }
 function renderImageModels() {
@@ -287,6 +309,8 @@ function updatePromptPreview() {
   $('#prompt-final-count').textContent = `${prompt.length} / 4000`;
   $('#prompt-final-count').classList.toggle('over-limit', prompt.length > 4000);
   $('#prompt-final-error').classList.toggle('is-hidden', prompt.length <= 4000);
+  const modifiers = [$('#prompt-prefix').value.trim() ? '前置词已启用' : '无前置词', $('#prompt-avoid').value.trim() ? '避免元素已设置' : '可设置避免元素'];
+  $('#prompt-settings-state').textContent = modifiers.join(' · ');
 }
 function clearPromptModifiers() {
   $('#prompt-prefix').value = '';

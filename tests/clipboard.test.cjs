@@ -26,6 +26,14 @@ async function main() {
   assert.ok(sizeOptions, 'Studio must include aspect ratio options');
   const selectedSizes = [...sizeOptions.matchAll(/<option value="([^"]+)" selected>/g)].map((match) => match[1]);
   assert.deepEqual(selectedSizes, ['1536x864'], 'A new creation defaults to 16:9 widescreen');
+  const styleOptions = studioHtml.match(/<select id="prompt-style">([\s\S]*?)<\/select>/)?.[1];
+  assert.ok(styleOptions, 'Style selection must stay in the primary composer');
+  assert.ok([...styleOptions.matchAll(/<option value=/g)].length >= 25, 'Offer a useful range of styles');
+  assert.match(styleOptions, /<optgroup label="摄影与影视">/, 'Group the expanded styles');
+  assert.match(studioHtml, /<details id="tag-panel" class="tag-panel">/, 'Inspiration tags start collapsed');
+  assert.match(studioHtml, /<details id="prompt-settings" class="prompt-settings">/, 'Advanced controls start collapsed');
+  assert.match(studioCss, /\.composer-fields\s*\{[^}]*overflow-y:\s*auto/, 'Optional controls scroll inside the composer');
+  assert.match(studioCss, /\.generation-actions\s*\{[^}]*flex:\s*none/, 'The generate action remains visible below the scrolling controls');
   const initialPrefix = studioHtml.match(/<textarea id="prompt-prefix"[^>]*>([\s\S]*?)<\/textarea>/)?.[1];
   assert.ok(initialPrefix, 'Studio must expose an editable prompt prefix');
   const elements = new Map(); const documentEvents = {};
@@ -129,6 +137,9 @@ async function main() {
   elements.get('#prompt').dispatchEvent(new Event('input'));
   const composed = '主体清晰，构图完整。\n动漫插画风格，细腻线条，柔和光影。\n雨夜的城堡\n请尽量避免：水印';
   assert.equal(vm.runInContext('composePrompt()', context), composed);
+  elements.get('#prompt-style').value = 'watercolor';
+  assert.match(vm.runInContext('composePrompt()', context), /水彩绘本风格/, 'New styles affect the submitted prompt');
+  elements.get('#prompt-style').value = 'anime';
   assert.equal(elements.get('#prompt-final').textContent, composed, 'Preview must show the exact prompt to be submitted');
   elements.get('#prompt').value = '长'.repeat(4000);
   elements.get('#prompt').dispatchEvent(new Event('input'));
