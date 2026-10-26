@@ -129,6 +129,22 @@ async function refreshUser() { const data = await api('/api/auth/me'); state.use
 function selectedImageModel() {
   return state.models.find((item) => item.id === $('#image-model').value) || state.models[0];
 }
+const resolutionEdges = { '1K': 1024, '2K': 2048, '3K': 3072, '4K': 3840 };
+function resolutionPixels(size, tier) {
+  const [width, height] = size.split('x').map(Number); const edge = resolutionEdges[tier];
+  if (!edge || !width || !height) return null;
+  return width >= height ? `${edge}×${Math.max(2, Math.round(edge * height / width / 2) * 2)}`
+    : `${Math.max(2, Math.round(edge * width / height / 2) * 2)}×${edge}`;
+}
+function updateResolutionInfo() {
+  const size = $('#size').value || '1536x864'; const tier = $('#resolution-tier').value || 'original';
+  Array.from($('#resolution-tier').options || []).forEach((option) => { if (option.value !== 'original') option.textContent = `${option.value} · ${resolutionPixels(size, option.value)}`; });
+  $('#resolution-hint').textContent = tier === 'original' ? '原始尺寸由图片节点决定。'
+    : `${tier} 导出 ${resolutionPixels(size, tier)} 像素；若节点返回尺寸不同，本站会按比例裁切或缩放。放大不会增加原生细节。`;
+}
+$('#size').addEventListener('change', updateResolutionInfo);
+$('#resolution-tier').addEventListener('change', updateResolutionInfo);
+updateResolutionInfo();
 function updateModelPrice() {
   const model = selectedImageModel();
   $('#generation-cost').textContent = `${model.credits_cost} 积分 / 张 · ¥${model.price_rmb}`;
@@ -455,7 +471,8 @@ function showResult(item) {
   $('#result-prompt').textContent = item.prompt;
   $('#share-result').href = '/?compose=1&image=' + encodeURIComponent(item.id);
   const modelName = state.models.find((model) => model.id === item.model)?.label || item.model || 'GPT Image 2.5 · 标准';
-  $('#result-meta').replaceChildren(...[item.mode === 'image-to-image' ? `图生图 · ${item.reference_count || 1} 张参考图` : '文生图', modelName, item.size, `${item.credits_cost ?? 1} 积分`].map((value) => { const el = document.createElement('span'); el.textContent = value; return el; }));
+  const outputLabel = item.output_size ? `${item.resolution && item.resolution !== 'original' ? item.resolution + ' · ' : '实际 · '}${item.output_size.replace('x', '×')}` : item.size;
+  $('#result-meta').replaceChildren(...[item.mode === 'image-to-image' ? `图生图 · ${item.reference_count || 1} 张参考图` : '文生图', modelName, outputLabel, `${item.credits_cost ?? 1} 积分`].map((value) => { const el = document.createElement('span'); el.textContent = value; return el; }));
 }
 $('#zoom-result').addEventListener('click', () => {
   const source = imageSource(state.activeImageItem?.image_src);
@@ -577,7 +594,7 @@ $('#generation-form').addEventListener('submit', async (event) => {
   $('#generation-empty').classList.add('generating');
   try {
     const references = await Promise.all(state.references.map((item) => asDataUrl(item.file)));
-    const body = { prompt, model: model.id, size: $('#size').value, quality: $('#quality').value };
+    const body = { prompt, model: model.id, size: $('#size').value, quality: $('#quality').value, resolution: $('#resolution-tier').value || 'original' };
     if (references.length) body.image_data_urls = references;
     const data = await api(`/api/images/${references.length ? 'edits' : 'generations'}`, { method: 'POST', headers: { 'Idempotency-Key': crypto.randomUUID() }, body: JSON.stringify(body) });
     setBalance(data.credits); showResult(data.item); state.history.unshift(data.item); renderHistory();
@@ -656,6 +673,7 @@ $('#logout-button').addEventListener('click', async () => { if (state.busy) retu
           clearPromptModifiers();
           $('#prompt').value = draft.prompt;
           if (Array.from($('#size').options).some((option) => option.value === draft.size)) $('#size').value = draft.size;
+          updateResolutionInfo();
           $('#prompt').dispatchEvent(new Event('input')); toast('参考提示词已带入，调整参数后即可创作');
         }
         sessionStorage.removeItem('astrogate.community-draft');

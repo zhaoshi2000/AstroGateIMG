@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+from io import BytesIO
 from decimal import Decimal, InvalidOperation
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager, contextmanager
@@ -27,6 +28,7 @@ from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Requ
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import AliasChoices, BaseModel, EmailStr, Field, field_validator
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from app.mail import send_registration_code
 from app.community_media import MAX_POST_BYTES, MAX_POST_IMAGES, MAX_UPLOAD_BYTES, store_post_images
@@ -37,7 +39,9 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 STATIC_DIR = ROOT_DIR / "app" / "static"
 SESSION_COOKIE = "astrogate_session"
 MAX_IMAGE_BYTES = 50 * 1024 * 1024
+MAX_OUTPUT_BYTES = 100 * 1024 * 1024
 MAX_REFERENCES = 8
+RESOLUTION_EDGES = {"1K": 1024, "2K": 2048, "3K": 3072, "4K": 3840}
 PASSWORD_ITERATIONS = 600_000
 IMAGE_MODELS = (
     {"id": "gpt-image-2", "label": "GPT Image 2.5 · 标准", "credits_cost": 1, "price_rmb": "0.05"},
@@ -171,6 +175,7 @@ class ImageGenerationRequest(BaseModel):
         "1792x768", "768x1792",
     ] = "1536x864"
     quality: str = Field(default="medium", pattern=r"^(low|medium|high)$")
+    resolution: Literal["original", "1K", "2K", "3K", "4K"] = "original"
 
     @field_validator("prompt")
     @classmethod
@@ -339,7 +344,7 @@ def initialize_database(path: Path, settings: Settings) -> None:
                 prompt TEXT NOT NULL, model TEXT NOT NULL, size TEXT NOT NULL, quality TEXT NOT NULL,
                 image_src TEXT, status TEXT NOT NULL, error_message TEXT, created_at TEXT NOT NULL,
                 mode TEXT NOT NULL DEFAULT 'text-to-image', reference_count INTEGER NOT NULL DEFAULT 0,
-                credits_cost INTEGER NOT NULL DEFAULT 0
+                credits_cost INTEGER NOT NULL DEFAULT 0, resolution TEXT NOT NULL DEFAULT 'original', output_size TEXT
             );
             CREATE TABLE IF NOT EXISTS credit_ledger (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id),
@@ -397,7 +402,7 @@ def initialize_database(path: Path, settings: Settings) -> None:
         """)
         migrations = {
             "users": {"credits": "INTEGER NOT NULL DEFAULT 0", "is_admin": "INTEGER NOT NULL DEFAULT 0", "email": "TEXT COLLATE NOCASE", "email_verified_at": "TEXT"},
-            "image_history": {"mode": "TEXT NOT NULL DEFAULT 'text-to-image'", "reference_count": "INTEGER NOT NULL DEFAULT 0", "credits_cost": "INTEGER NOT NULL DEFAULT 0"},
+            "image_history": {"mode": "TEXT NOT NULL DEFAULT 'text-to-image'", "reference_count": "INTEGER NOT NULL DEFAULT 0", "credits_cost": "INTEGER NOT NULL DEFAULT 0", "resolution": "TEXT NOT NULL DEFAULT 'original'", "output_size": "TEXT"},
             "generation_jobs": {"credits_cost": "INTEGER NOT NULL DEFAULT 1", "prompt": "TEXT"},
         }
         for table, fields in migrations.items():
@@ -475,6 +480,37 @@ def image_extension(data: bytes) -> str:
     if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
         return "webp"
     raise HTTPException(400, "图片内容无效，仅支持 PNG、JPG、WebP")
+
+
+def export_dimensions(size: str, resolution: str) -> tuple[int, int] | None:
+    if resolution == "original":
+        return None
+    width, height = (int(part) for part in size.split("x"))
+    edge = RESOLUTION_EDGES[resolution]
+    if width >= height:
+        return edge, max(2, round(edge * height / width / 2) * 2)
+    return max(2, round(edge * width / height / 2) * 2), edge
+
+
+def prepare_generated_image(data: bytes, target: tuple[int, int] | None) -> tuple[bytes, str, str]:
+    extension = image_extension(data)
+    try:
+        with Image.open(BytesIO(data)) as opened:
+            if target is None:
+                return data, extension, f"{opened.width}x{opened.height}"
+            image = ImageOps.exif_transpose(opened)
+            image.load()
+            image = image.convert("RGBA" if image.mode in ("RGBA", "LA") or "transparency" in image.info else "RGB")
+            if image.size != target:
+                image = ImageOps.fit(image, target, method=Image.Resampling.LANCZOS)
+            buffer = BytesIO()
+            image.save(buffer, format="PNG", compress_level=4)
+            output = buffer.getvalue()
+    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as exc:
+        raise HTTPException(502, "图片服务返回了无效图片") from exc
+    if len(output) > MAX_OUTPUT_BYTES:
+        raise HTTPException(502, "生成图片超过大小限制")
+    return output, "png", f"{target[0]}x{target[1]}"
 
 
 def decode_reference(value: str) -> tuple[dict[str, str], int]:
@@ -1245,7 +1281,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/images/history")
     def image_history(user=Depends(current_user)):
         with database_connection(database_path) as db:
-            rows = db.execute("SELECT id, prompt, model, size, quality, mode, reference_count, credits_cost, image_src, status, created_at FROM image_history WHERE user_id = ? ORDER BY created_at DESC LIMIT 60", (user["id"],)).fetchall()
+            rows = db.execute("SELECT id, prompt, model, size, quality, resolution, output_size, mode, reference_count, credits_cost, image_src, status, created_at FROM image_history WHERE user_id = ? ORDER BY created_at DESC LIMIT 60", (user["id"],)).fetchall()
         return {"items": [dict(row) for row in rows]}
 
     @app.get("/api/images/files/{item_id}")
@@ -1313,7 +1349,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if sum(size for _, size in decoded) > MAX_IMAGE_BYTES:
             raise HTTPException(413, "参考图总大小不能超过 50MB")
         mode = "image-to-image" if references else "text-to-image"
-        payload = {"prompt": body.prompt, "model": body.model, "size": body.size, "quality": body.quality, "n": 1, "response_format": "b64_json", "stream": False}
+        target = export_dimensions(body.size, body.resolution)
+        upstream_size = f"{target[0]}x{target[1]}" if target else body.size
+        payload = {"prompt": body.prompt, "model": body.model, "size": upstream_size, "quality": body.quality, "n": 1, "response_format": "b64_json", "stream": False}
         if references:
             payload["images"] = [item for item, _ in decoded]
         key = request_key or secrets.token_hex(16)
@@ -1344,24 +1382,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         downloaded.raise_for_status()
                         async for chunk in downloaded.aiter_bytes():
                             chunks.extend(chunk)
-                            if len(chunks) > MAX_IMAGE_BYTES:
+                            if len(chunks) > MAX_OUTPUT_BYTES:
                                 raise HTTPException(502, "生成图片超过大小限制")
                     output = bytes(chunks)
                 else:
                     raise HTTPException(502, "图片服务未返回图片")
-            if len(output) > MAX_IMAGE_BYTES:
+            if len(output) > MAX_OUTPUT_BYTES:
                 raise HTTPException(502, "生成图片超过大小限制")
             try:
-                extension = image_extension(output)
+                output, extension, output_size = prepare_generated_image(output, target)
             except HTTPException as exc:
-                raise HTTPException(502, "图片服务返回了无效图片") from exc
+                raise HTTPException(502, exc.detail) from exc
             output_path = image_dir / f"{job_id}.{extension}"
             output_path.write_bytes(output)
             item = {"id": job_id, "prompt": body.prompt, "model": body.model, "size": body.size, "quality": body.quality,
-                    "mode": mode, "reference_count": len(references), "credits_cost": credits_cost, "image_src": f"/api/images/files/{job_id}", "status": "succeeded", "created_at": now_iso()}
+                    "resolution": body.resolution, "output_size": output_size, "mode": mode, "reference_count": len(references), "credits_cost": credits_cost, "image_src": f"/api/images/files/{job_id}", "status": "succeeded", "created_at": now_iso()}
             with database_connection(database_path) as db:
-                db.execute("INSERT INTO image_history (id, user_id, prompt, model, size, quality, mode, reference_count, credits_cost, image_src, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                           (job_id, user["id"], body.prompt, body.model, body.size, body.quality, mode, len(references), credits_cost, item["image_src"], "succeeded", item["created_at"]))
+                db.execute("INSERT INTO image_history (id, user_id, prompt, model, size, quality, resolution, output_size, mode, reference_count, credits_cost, image_src, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                           (job_id, user["id"], body.prompt, body.model, body.size, body.quality, body.resolution, output_size, mode, len(references), credits_cost, item["image_src"], "succeeded", item["created_at"]))
                 db.execute("UPDATE generation_jobs SET status = 'succeeded' WHERE id = ?", (job_id,))
             return {"item": item, "credits": current_balance(user["id"])}
         except BaseException as exc:

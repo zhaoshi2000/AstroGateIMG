@@ -27,6 +27,9 @@ async function main() {
   assert.ok(sizeOptions, 'Studio must include aspect ratio options');
   const selectedSizes = [...sizeOptions.matchAll(/<option value="([^"]+)" selected>/g)].map((match) => match[1]);
   assert.deepEqual(selectedSizes, ['1536x864'], 'A new creation defaults to 16:9 widescreen');
+  const resolutionOptions = studioHtml.match(/<select id="resolution-tier">([\s\S]*?)<\/select>/)?.[1];
+  assert.ok(resolutionOptions, 'Studio offers an output resolution selector');
+  assert.deepEqual([...resolutionOptions.matchAll(/<option value="([^"]+)"/g)].map((match) => match[1]), ['original', '1K', '2K', '3K', '4K']);
   const styleOptions = studioHtml.match(/<select id="prompt-style">([\s\S]*?)<\/select>/)?.[1];
   assert.ok(styleOptions, 'Style selection must stay in the primary composer');
   const styleValues = [...styleOptions.matchAll(/<option value="([^"]+)"/g)].map((match) => match[1]);
@@ -50,6 +53,8 @@ async function main() {
   const drafts = new Map([['astrogate.community-draft', JSON.stringify({ prompt: 'Showcase prompt carried into the studio', size: '864x1536' })]]);
   document.querySelector('#size').options = [{ value: '1536x864' }, { value: '864x1536' }];
   document.querySelector('#size').value = selectedSizes[0];
+  document.querySelector('#resolution-tier').options = ['original', '1K', '2K', '3K', '4K'].map((value) => ({ value }));
+  document.querySelector('#resolution-tier').value = 'original';
   document.querySelector('#prompt-prefix').value = initialPrefix;
   document.querySelector('#prompt-style').value = 'none';
   const context = vm.createContext({ document, window: { addEventListener: () => {} }, location: { pathname: '/studio', search: '', hash: '' },
@@ -60,6 +65,8 @@ async function main() {
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../app/static/app.js'), 'utf8'), context);
   const styleKeys = vm.runInContext('Object.keys(promptStyles)', context);
+  assert.equal(vm.runInContext("resolutionPixels('1536x864', '4K')", context), '3840×2160');
+  assert.equal(vm.runInContext("resolutionPixels('864x1536', '2K')", context), '1152×2048');
   assert.deepEqual(styleValues.slice().sort(), Array.from(styleKeys).sort(), 'Every visible style must have a prompt modifier');
   await new Promise(setImmediate);
   assert.equal(document.body.classList.contains('studio-theme'), true, 'Studio must use its dedicated dark workspace theme');
@@ -170,6 +177,9 @@ async function main() {
   elements.get('#prompt').value = '雨夜的城堡';
   elements.get('#prompt').dispatchEvent(new Event('input'));
   elements.get('#size').value = '1536x864';
+  elements.get('#resolution-tier').value = '4K';
+  elements.get('#resolution-tier').dispatchEvent(new Event('change'));
+  assert.match(elements.get('#resolution-hint').textContent, /3840×2160/, 'Changing tier shows the exact export dimensions');
   let submitted;
   context.fetch = async (url, options = {}) => {
     if (url === '/api/images/generations') {
@@ -182,6 +192,7 @@ async function main() {
   await elements.get('#generation-form').events.submit({ preventDefault() {} });
   assert.equal(submitted.prompt, composed, 'The API must receive exactly what the preview showed');
   assert.equal(submitted.size, '1536x864');
+  assert.equal(submitted.resolution, '4K');
   assert.equal(elements.get('#result-prompt').textContent, composed);
   vm.runInContext('setBalance(5)', context);
   let tagCalls = 0;

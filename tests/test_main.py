@@ -3,6 +3,7 @@ import base64
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import json
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -10,8 +11,9 @@ from unittest.mock import patch
 
 import httpx
 from fastapi.testclient import TestClient
+from PIL import Image
 
-from app.main import GALLERY_BY_ID, Settings, create_app, database_connection
+from app.main import GALLERY_BY_ID, Settings, create_app, database_connection, export_dimensions
 
 PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9WlYb4wAAAAASUVORK5CYII='
 REFERENCE = 'data:image/png;base64,' + PNG
@@ -102,6 +104,37 @@ class AstroGateTests(unittest.TestCase):
             self.assertEqual(portrait.status_code, 200, portrait.text)
             self.assertEqual([call['size'] for call in self.calls], ['1536x864', '864x1536'])
             self.assertEqual(portrait.json()['item']['size'], '864x1536')
+
+    def test_resolution_tiers_export_exact_pixels_and_keep_model_pricing(self):
+        source = BytesIO()
+        Image.new('RGB', (168, 94), '#305080').save(source, format='PNG')
+        encoded = base64.b64encode(source.getvalue()).decode()
+
+        def upstream(request):
+            self.calls.append(json.loads(request.content))
+            return httpx.Response(200, json={'data': [{'b64_json': encoded}]})
+
+        expected = {'1K': (1024, 576), '2K': (2048, 1152), '3K': (3072, 1728), '4K': (3840, 2160)}
+        with TestClient(self.app(5, upstream)) as client:
+            self.register(client)
+            for tier, dimensions in expected.items():
+                response = client.post('/api/images/generations', json={'prompt': 'blue landscape', 'resolution': tier})
+                self.assertEqual(response.status_code, 200, response.text)
+                item = response.json()['item']
+                self.assertEqual(item['resolution'], tier)
+                self.assertEqual(item['output_size'], f'{dimensions[0]}x{dimensions[1]}')
+                self.assertEqual(item['credits_cost'], 1)
+                self.assertEqual(self.calls[-1]['size'], item['output_size'])
+                with Image.open(BytesIO(client.get(item['image_src']).content)) as result:
+                    self.assertEqual(result.size, dimensions)
+            portrait = client.post('/api/images/edits', json={'prompt': 'blue portrait', 'size': '864x1536', 'resolution': '2K', 'image_data_urls': [REFERENCE]})
+            self.assertEqual(portrait.status_code, 200, portrait.text)
+            self.assertEqual(portrait.json()['item']['output_size'], '1152x2048')
+            self.assertEqual(self.calls[-1]['size'], '1152x2048')
+            self.assertEqual(client.get('/api/wallet').json()['credits'], 0)
+            self.assertEqual(client.get('/api/images/history').json()['items'][0]['resolution'], '2K')
+        self.assertEqual(export_dimensions('1024x1024', '4K'), (3840, 3840))
+        self.assertEqual(export_dimensions('1536x864', 'original'), None)
 
     def test_failed_generation_refunds_credits(self):
         def fail(request):
