@@ -7,7 +7,7 @@ const { webcrypto } = require('node:crypto');
 // A small DOM fixture exercises the production paste handler without a browser.
 class Element {
   constructor() {
-    this.events = {}; this.children = []; this.value = ''; this.dataset = {};
+    this.events = {}; this.children = []; this.value = ''; this.dataset = {}; this.style = {}; this.clientWidth = 800; this.clientHeight = 600;
     const classes = new Set();
     this.classList = { add: (...names) => names.forEach((name) => classes.add(name)), remove: (...names) => names.forEach((name) => classes.delete(name)), contains: (name) => classes.has(name), toggle: (name, enabled) => enabled ? classes.add(name) : classes.delete(name) };
   }
@@ -17,6 +17,7 @@ class Element {
   replaceChildren(...children) { this.children = children; }
   focus() {}
   dispatchEvent(event) { this.events[event.type]?.(event); }
+  getBoundingClientRect() { return { left: 0, top: 0, width: this.clientWidth, height: this.clientHeight }; }
 }
 async function main() {
   const studioHtml = fs.readFileSync(path.join(__dirname, '../app/static/index.html'), 'utf8');
@@ -37,7 +38,8 @@ async function main() {
   assert.match(studioCss, /\.composer-fields\s*\{[^}]*overflow-y:\s*auto/, 'Optional controls scroll inside the composer');
   assert.match(studioCss, /\.generation-actions\s*\{[^}]*flex:\s*none/, 'The generate action remains visible below the scrolling controls');
   const initialPrefix = studioHtml.match(/<textarea id="prompt-prefix"[^>]*>([\s\S]*?)<\/textarea>/)?.[1];
-  assert.ok(initialPrefix, 'Studio must expose an editable prompt prefix');
+  assert.notEqual(initialPrefix, undefined, 'Studio must expose an editable prompt prefix');
+  assert.equal(initialPrefix, '', 'Manual prompts must not receive a default prefix');
   const elements = new Map(); const documentEvents = {};
   const document = {
     body: new Element(),
@@ -128,6 +130,16 @@ async function main() {
   elements.get('#zoom-result').events.click();
   assert.equal(zoomOpened, true, 'Zoom button opens the enlarged artwork');
   assert.equal(elements.get('#zoom-image').src, historyImage);
+  const viewport = elements.get('#zoom-viewport');
+  viewport.dispatchEvent({ type: 'wheel', deltaY: -450, clientX: 500, clientY: 300, preventDefault() {} });
+  assert.ok(Number.parseInt(elements.get('#zoom-level').textContent) > 100, 'Wheel magnifies the image');
+  const beforeDrag = elements.get('#zoom-image').style.transform;
+  viewport.dispatchEvent({ type: 'pointerdown', button: 0, pointerId: 1, clientX: 500, clientY: 300, preventDefault() {} });
+  viewport.dispatchEvent({ type: 'pointermove', pointerId: 1, clientX: 540, clientY: 330 });
+  viewport.dispatchEvent({ type: 'pointerup', pointerId: 1 });
+  assert.notEqual(elements.get('#zoom-image').style.transform, beforeDrag, 'Left drag pans the enlarged image');
+  elements.get('#zoom-reset').events.click();
+  assert.equal(elements.get('#zoom-level').textContent, '100%', 'Reset fits the image again');
   context.fetch = async (url) => ({ ok: url === historyImage, blob: async () => new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' }) });
   await elements.get('#use-result-reference').events.click();
   assert.equal(vm.runInContext('state.references.length', context), 1, 'Current artwork can be used as the next generation reference');

@@ -438,6 +438,26 @@ def image_error_detail(payload: object) -> str:
     return str(detail)[:500]
 
 
+def generation_failure_reason(message: str | None) -> str:
+    if not message:
+        return "未记录原因"
+    if any(word in message for word in ("裸露", "色情", "情色")):
+        return "上游内容限制：裸露或情色"
+    if "生成的图片可能违反" in message:
+        return "生成结果被上游内容审核拦截"
+    if "内容政策" in message:
+        return "提示词被上游内容审核拦截"
+    if "超时" in message:
+        return "上游生成超时"
+    if "重启" in message:
+        return "服务重启，积分已退回"
+    if "限流" in message or "429" in message:
+        return "上游账号限流"
+    if "额度" in message or "quota" in message.lower():
+        return "上游图片额度不足"
+    return "上游生成失败，积分已退回"
+
+
 def image_extension(data: bytes) -> str:
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
         return "png"
@@ -833,7 +853,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if prompt:
             return {"prompt": prompt[:4000], "source": "ai"}
         idea = body.idea.strip().rstrip("，。；; ")
-        fallback = f"{idea}。主体清晰，画面重点突出；安排前景、中景与背景，构图自然完整，透视关系准确。使用与主题相符的光线和配色，呈现丰富而克制的材质细节、空间层次与氛围。保持画面干净、细节连贯，避免无关文字、水印和杂乱元素。"
+        fallback = f"{idea}。主体清晰，画面重点突出；安排前景、中景与背景，构图自然完整，透视关系准确。使用与主题相符的光线和配色，呈现材质细节、空间层次与氛围。"
         return {"prompt": fallback[:4000], "source": "fallback"}
 
     @app.post("/api/prompts/tags")
@@ -1021,8 +1041,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             jobs = dict(db.execute("SELECT COUNT(*) AS generated, COALESCE(SUM(created_at >= ?), 0) AS generated_today FROM generation_jobs WHERE status = 'succeeded'", (start,)).fetchone())
             pending = db.execute("SELECT COUNT(*) FROM generation_jobs WHERE status = 'pending'").fetchone()[0]
             codes = dict(db.execute("SELECT COUNT(*) AS total, COALESCE(SUM(redeemed_by IS NOT NULL), 0) AS redeemed FROM redemption_codes").fetchone())
-            recent = db.execute("SELECT j.id, j.status, j.created_at, u.username FROM generation_jobs j JOIN users u ON u.id = j.user_id ORDER BY j.created_at DESC LIMIT 10").fetchall()
-        return {"customers": customers, "jobs": {**jobs, "pending": pending}, "codes": codes, "recent_jobs": [dict(row) for row in recent]}
+            recent = db.execute("SELECT j.id, j.status, j.created_at, j.error_message, u.username FROM generation_jobs j JOIN users u ON u.id = j.user_id ORDER BY j.created_at DESC LIMIT 10").fetchall()
+        recent_jobs = [{key: row[key] for key in ("id", "status", "created_at", "username")} |
+                       {"failure_reason": generation_failure_reason(row["error_message"]) if row["status"] == "failed" else None}
+                       for row in recent]
+        return {"customers": customers, "jobs": {**jobs, "pending": pending}, "codes": codes, "recent_jobs": recent_jobs}
 
     @app.get("/api/wallet")
     def wallet(user=Depends(current_user)):
@@ -1131,6 +1154,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             rows = db.execute("SELECT * FROM users WHERE username LIKE ? OR email LIKE ? ORDER BY id DESC LIMIT 100", (f"%{q[:254]}%", f"%{q[:254]}%" )).fetchall()
             stats = db.execute("SELECT COUNT(*) AS users, COALESCE(SUM(credits), 0) AS credits FROM users").fetchone()
         return {"items": [public_user(row) for row in rows], "stats": dict(stats)}
+
+    @app.get("/api/admin/users/{user_id}/records")
+    def user_records(user_id: int, user=Depends(admin_user)):
+        with database_connection(database_path) as db:
+            target = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+            if not target:
+                raise HTTPException(404, "用户不存在")
+            jobs = db.execute("SELECT id, status, created_at, credits_cost, error_message FROM generation_jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT 30", (user_id,)).fetchall()
+            ledger = db.execute("SELECT amount, balance_after, kind, description, created_at FROM credit_ledger WHERE user_id = ? ORDER BY id DESC LIMIT 30", (user_id,)).fetchall()
+            orders = db.execute("SELECT id, amount_cents, credits, status, created_at, paid_at FROM payment_orders WHERE user_id = ? ORDER BY created_at DESC LIMIT 20", (user_id,)).fetchall()
+        return {"user": public_user(target),
+                "jobs": [{"id": row["id"], "status": row["status"], "created_at": row["created_at"],
+                          "credits_cost": row["credits_cost"],
+                          "failure_reason": generation_failure_reason(row["error_message"]) if row["status"] == "failed" else None}
+                         for row in jobs],
+                "ledger": [dict(row) for row in ledger], "payment_orders": [dict(row) for row in orders]}
 
     @app.post("/api/admin/users/{user_id}/credits")
     def adjust_credits(user_id: int, body: CreditAdjustment, user=Depends(admin_user)):

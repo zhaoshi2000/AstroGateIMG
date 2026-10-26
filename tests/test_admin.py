@@ -7,7 +7,7 @@ import unittest
 import httpx
 from fastapi.testclient import TestClient
 
-from app.main import Settings, create_app
+from app.main import Settings, create_app, database_connection, generation_failure_reason
 from app.upstream_admin import project_accounts
 
 
@@ -62,6 +62,7 @@ class AdminTests(unittest.TestCase):
             client.post('/api/auth/register', json={'email': email, 'password': 'customer-password', 'code': self.mailbox[email]})
             self.assertEqual(client.get('/api/admin/me').status_code, 403)
             self.assertEqual(client.get('/api/admin/overview').status_code, 403)
+            self.assertEqual(client.get('/api/admin/users/1/records').status_code, 403)
             self.assertEqual(client.get('/api/admin/upstream/accounts').status_code, 403)
             self.assertEqual(client.post('/api/admin/upstream/refresh', json={}).status_code, 403)
             self.assertEqual(len(self.calls), 0)
@@ -102,6 +103,28 @@ class AdminTests(unittest.TestCase):
             response = client.get('/api/admin/upstream/accounts')
             self.assertEqual(response.status_code, 502)
             self.assertNotIn('private-upstream-key', response.text)
+
+    def test_recent_jobs_show_safe_failure_cause(self):
+        self.assertEqual(generation_failure_reason('生成的图片可能违反内容政策'), '生成结果被上游内容审核拦截')
+        self.assertEqual(generation_failure_reason('上游超时'), '上游生成超时')
+        with TestClient(self.app()) as client:
+            self.login(client)
+            db_path = Path(self.directory.name) / 'astrogate.db'
+            with database_connection(db_path) as db:
+                user_id = db.execute("SELECT id FROM users WHERE username = 'operator'").fetchone()[0]
+                db.execute("INSERT INTO generation_jobs (id, user_id, request_key, fingerprint, status, created_at, error_message, credits_cost) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                           ('failed-1', user_id, 'request-1', 'fingerprint', 'failed', '2026-10-26T00:00:00Z',
+                            '提示可能违反了我们的内容政策 private-upstream-key', 1))
+            response = client.get('/api/admin/overview')
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()['recent_jobs'][0]['failure_reason'], '提示词被上游内容审核拦截')
+            self.assertNotIn('private-upstream-key', response.text)
+            records = client.get(f'/api/admin/users/{user_id}/records')
+            self.assertEqual(records.status_code, 200)
+            self.assertEqual(records.json()['jobs'][0]['failure_reason'], '提示词被上游内容审核拦截')
+            self.assertEqual(records.json()['user']['username'], 'operator')
+            self.assertNotIn('private-upstream-key', records.text)
+            self.assertEqual(client.get('/api/admin/users/999999/records').status_code, 404)
 
     def test_malformed_claims_are_not_trusted_as_account_objects(self):
         invalid = 'header.' + base64.urlsafe_b64encode(b'[]').decode() + '.signature'

@@ -462,7 +462,52 @@ $('#zoom-result').addEventListener('click', () => {
   if (!source) return;
   $('#zoom-image').src = source;
   $('#image-zoom-dialog').showModal();
+  resetZoom();
 });
+const zoomState = { scale: 1, x: 0, y: 0, dragging: false, pointerId: null, lastX: 0, lastY: 0 };
+function renderZoom() {
+  const viewport = $('#zoom-viewport'); const image = $('#zoom-image');
+  const maxX = Math.max(0, (image.clientWidth * zoomState.scale - viewport.clientWidth) / 2);
+  const maxY = Math.max(0, (image.clientHeight * zoomState.scale - viewport.clientHeight) / 2);
+  zoomState.x = Math.max(-maxX, Math.min(maxX, zoomState.x));
+  zoomState.y = Math.max(-maxY, Math.min(maxY, zoomState.y));
+  image.style.transform = `translate3d(${zoomState.x}px, ${zoomState.y}px, 0) scale(${zoomState.scale})`;
+  $('#zoom-level').textContent = `${Math.round(zoomState.scale * 100)}%`;
+  $('#zoom-out').disabled = zoomState.scale <= 1;
+  $('#zoom-in').disabled = zoomState.scale >= 8;
+  viewport.classList.toggle('is-zoomed', zoomState.scale > 1);
+  viewport.classList.toggle('is-dragging', zoomState.dragging);
+}
+function resetZoom() { zoomState.scale = 1; zoomState.x = 0; zoomState.y = 0; zoomState.dragging = false; zoomState.pointerId = null; renderZoom(); }
+function setZoom(scale, clientX, clientY) {
+  const viewport = $('#zoom-viewport'); const rect = viewport.getBoundingClientRect();
+  const focusX = Number.isFinite(clientX) ? clientX : rect.left + rect.width / 2;
+  const focusY = Number.isFinite(clientY) ? clientY : rect.top + rect.height / 2;
+  const next = Math.max(1, Math.min(8, scale)); const ratio = next / zoomState.scale;
+  zoomState.x = (focusX - rect.left - rect.width / 2) * (1 - ratio) + zoomState.x * ratio;
+  zoomState.y = (focusY - rect.top - rect.height / 2) * (1 - ratio) + zoomState.y * ratio;
+  zoomState.scale = next; renderZoom();
+}
+$('#zoom-viewport').addEventListener('wheel', (event) => { event.preventDefault(); setZoom(zoomState.scale * Math.exp(-event.deltaY * 0.0015), event.clientX, event.clientY); }, { passive: false });
+$('#zoom-viewport').addEventListener('pointerdown', (event) => {
+  if (event.button !== 0 || zoomState.scale <= 1) return;
+  event.preventDefault(); zoomState.dragging = true; zoomState.pointerId = event.pointerId;
+  zoomState.lastX = event.clientX; zoomState.lastY = event.clientY;
+  $('#zoom-viewport').setPointerCapture?.(event.pointerId); renderZoom();
+});
+$('#zoom-viewport').addEventListener('pointermove', (event) => {
+  if (!zoomState.dragging || event.pointerId !== zoomState.pointerId) return;
+  zoomState.x += event.clientX - zoomState.lastX; zoomState.y += event.clientY - zoomState.lastY;
+  zoomState.lastX = event.clientX; zoomState.lastY = event.clientY; renderZoom();
+});
+function stopZoomDrag(event) { if (event.pointerId !== zoomState.pointerId) return; zoomState.dragging = false; zoomState.pointerId = null; renderZoom(); }
+['pointerup', 'pointercancel', 'lostpointercapture'].forEach((name) => $('#zoom-viewport').addEventListener(name, stopZoomDrag));
+$('#zoom-in').addEventListener('click', () => setZoom(zoomState.scale * 1.25));
+$('#zoom-out').addEventListener('click', () => setZoom(zoomState.scale / 1.25));
+$('#zoom-reset').addEventListener('click', resetZoom);
+$('#zoom-image').addEventListener('load', resetZoom);
+$('#image-zoom-dialog').addEventListener('close', resetZoom);
+window.addEventListener('resize', renderZoom);
 $('#close-image-zoom').addEventListener('click', () => $('#image-zoom-dialog').close());
 $('#image-zoom-dialog').addEventListener('click', (event) => { if (event.target === $('#image-zoom-dialog')) $('#image-zoom-dialog').close(); });
 $('#use-result-reference').addEventListener('click', async () => {

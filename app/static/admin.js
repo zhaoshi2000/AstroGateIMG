@@ -53,7 +53,7 @@
     $('#metric-users').textContent = result.customers.users; $('#metric-credits').textContent = result.customers.credits;
     $('#metric-today').textContent = result.jobs.generated_today; $('#metric-generated').textContent = result.jobs.generated; $('#metric-pending').textContent = result.jobs.pending;
     $('#metric-codes').textContent = result.codes.total; $('#metric-redeemed').textContent = result.codes.redeemed;
-    $('#recent-jobs').replaceChildren(...result.recent_jobs.map((job) => { const row = el('tr'); const status = td(); status.textContent = ''; status.append(badge(job.status)); row.append(td(job.id.slice(0, 12)), td(job.username), status, td(date(job.created_at))); return row; }));
+    $('#recent-jobs').replaceChildren(...result.recent_jobs.map((job) => { const row = el('tr'); const status = td(); status.textContent = ''; status.append(badge(job.status)); row.append(td(job.id.slice(0, 12)), td(job.username), status, td(job.failure_reason || '—', 'job-reason'), td(date(job.created_at))); return row; }));
     $('#recent-jobs-empty').classList.toggle('hidden', result.recent_jobs.length > 0);
   }
   async function refreshQuota(ids) {
@@ -84,8 +84,22 @@
       const input = el('input'); input.type = 'number'; input.min = -1000000; input.max = 1000000; input.required = true; input.placeholder = '+100 / -10'; input.setAttribute('aria-label', user.username + ' 积分调整');
       const button = el('button', 'secondary', '调整'); button.type = 'submit'; form.append(input, button); action.append(form);
       form.addEventListener('submit', async (event) => { event.preventDefault(); const amount = Number(input.value); if (!amount || !Number.isInteger(amount)) return toast('请输入非零的整数积分', true); button.disabled = true; try { await api(`/api/admin/users/${user.id}/credits`, { method: 'POST', body: JSON.stringify({ amount, reason: '管理后台手动调整积分' }) }); await loadUsers(); toast('积分已调整，并记录到流水'); } catch (error) { toast(error.message, true); } finally { button.disabled = false; } });
-      row.append(td(user.email || user.username), td(user.is_admin ? '管理员' : '客户'), td(date(user.created_at)), td(user.credits), action); return row;
+      const records = td(); records.textContent = ''; const open = el('button', 'secondary', '查看记录'); open.type = 'button';
+      open.addEventListener('click', () => loadUserRecords(user.id).catch((error) => toast(error.message, true))); records.append(open);
+      row.append(td(user.email || user.username), td(user.is_admin ? '管理员' : '客户'), td(date(user.created_at)), td(user.credits), records, action); return row;
     })); $('#users-empty').classList.toggle('hidden', result.items.length > 0);
+  }
+  async function loadUserRecords(userId) {
+    const result = await api(`/api/admin/users/${userId}/records`);
+    $('#user-records-title').textContent = `${result.user.email || result.user.username} · 用户记录`;
+    $('#user-records-summary').textContent = `当前余额 ${result.user.credits} 积分 · 最近 30 笔出图任务、30 笔积分流水、20 笔充值订单`;
+    $('#user-records-jobs').replaceChildren(...result.jobs.map((job) => {
+      const row = el('tr'); const status = td(); status.textContent = ''; status.append(badge(job.status));
+      row.append(td(job.id.slice(0, 12)), status, td(job.credits_cost), td(job.failure_reason || '—', 'job-reason'), td(date(job.created_at))); return row;
+    }));
+    $('#user-records-ledger').replaceChildren(...result.ledger.map((entry) => { const row = el('tr'); row.append(td(date(entry.created_at)), td(entry.amount > 0 ? `+${entry.amount}` : entry.amount), td(entry.balance_after), td(entry.description)); return row; }));
+    $('#user-records-orders').replaceChildren(...result.payment_orders.map((order) => { const row = el('tr'); row.append(td(order.id), td(`¥${(order.amount_cents / 100).toFixed(2)}`), td(order.credits), td(order.status === 'paid' ? '已到账' : '待支付'), td(date(order.created_at))); return row; }));
+    $('#user-records-panel').classList.remove('hidden'); $('#user-records-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
   async function loadCodes() {
     const result = await api('/api/admin/codes');
@@ -108,6 +122,7 @@
   $('#select-all-accounts').addEventListener('change', () => { filteredAccounts().forEach((account) => $('#select-all-accounts').checked ? state.selected.add(account.id) : state.selected.delete(account.id)); renderAccounts(); });
   $('#refresh-selected').addEventListener('click', () => { if (state.selected.size) refreshQuota([...state.selected]); }); $('#refresh-upstream').addEventListener('click', () => refreshQuota([]));
   $('#admin-user-search-form').addEventListener('submit', (event) => { event.preventDefault(); loadUsers().catch((error) => toast(error.message, true)); });
+  $('#close-user-records').addEventListener('click', () => $('#user-records-panel').classList.add('hidden'));
   $('#admin-code-form').addEventListener('submit', async (event) => { event.preventDefault(); const button = event.target.querySelector('button'); button.disabled = true; try { const result = await api('/api/admin/codes', { method: 'POST', body: JSON.stringify({ credits: Number($('#code-credits').value), count: Number($('#code-count').value), expires_days: Number($('#code-days').value) }) }); $('#new-admin-code-text').value = result.codes.join('\n'); $('#new-admin-codes').classList.remove('hidden'); await loadCodes(); toast('兑换码已生成，请保存完整内容'); } catch (error) { toast(error.message, true); } finally { button.disabled = false; } });
   $('#copy-admin-codes').addEventListener('click', async () => { try { await navigator.clipboard.writeText($('#new-admin-code-text').value); toast('兑换码已复制'); } catch { $('#new-admin-code-text').focus(); $('#new-admin-code-text').select(); toast('请按 Ctrl + C 复制选中的兑换码'); } });
   setInterval(() => { if (state.user && !state.refreshing && document.visibilityState === 'visible' && ['overview', 'accounts'].includes(page)) loadAccounts().catch(() => {}); }, 30000);

@@ -176,3 +176,19 @@ body.studio-theme #studio-panel .generation-actions .generation-progress { margi
   body.studio-theme #studio-panel .style-quick small { font-size: 8px; }
   body.studio-theme #studio-panel .dropzone-copy small { font-size: 8px; }
 }
+
+body.studio-theme #studio-panel .image-zoom-dialog[open] { display: flex; flex-direction: column; width: min(96vw, 1800px); height: min(94dvh, 1100px); max-width: 96vw; max-height: 94dvh; padding: 0; overflow: hidden; }
+body.studio-theme #studio-panel .zoom-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 11px 15px; border-bottom: 1px solid #47405f; background: #171d31; }
+body.studio-theme #studio-panel .zoom-caption { display: grid; gap: 3px; color: #f2ecff; font-size: 12px; }
+body.studio-theme #studio-panel .zoom-caption span { color: #aeb6cb; font-size: 10px; }
+body.studio-theme #studio-panel .zoom-controls { display: flex; align-items: center; gap: 7px; }
+body.studio-theme #studio-panel .zoom-controls button { min-width: 32px; padding: 6px 9px; border: 1px solid #655783; border-radius: 7px; background: #292540; color: #f0e4ff; font-size: 12px; }
+body.studio-theme #studio-panel .zoom-controls button:hover { background: #403358; }
+body.studio-theme #studio-panel .zoom-controls button:disabled { opacity: .5; cursor: default; }
+body.studio-theme #studio-panel .zoom-controls output { min-width: 43px; text-align: center; color: #eadcff; font-size: 11px; font-variant-numeric: tabular-nums; }
+body.studio-theme #studio-panel .image-zoom-close { position: static; }
+body.studio-theme #studio-panel .zoom-viewport { display: flex; flex: 1; align-items: center; justify-content: center; min-height: 0; overflow: hidden; background: #0b1020; touch-action: none; }
+body.studio-theme #studio-panel .zoom-viewport.is-zoomed { cursor: grab; }
+body.studio-theme #studio-panel .zoom-viewport.is-dragging { cursor: grabbing; }
+body.studio-theme #studio-panel .image-zoom-dialog .zoom-viewport img { display: block; width: auto; height: auto; max-width: 100%; max-height: 100%; margin: auto; flex: none; object-fit: contain; pointer-events: none; user-select: none; transform-origin: center; will-change: transform; }
+@media (max-width: 650px) { body.studio-theme #studio-panel .zoom-caption span { display: none; } body.studio-theme #studio-panel .zoom-toolbar { padding: 9px; } body.studio-theme #studio-panel .zoom-controls { gap: 4px; } body.studio-theme #studio-panel .zoom-controls button { padding: 6px; } }
