@@ -344,7 +344,8 @@ def initialize_database(path: Path, settings: Settings) -> None:
                 prompt TEXT NOT NULL, model TEXT NOT NULL, size TEXT NOT NULL, quality TEXT NOT NULL,
                 image_src TEXT, status TEXT NOT NULL, error_message TEXT, created_at TEXT NOT NULL,
                 mode TEXT NOT NULL DEFAULT 'text-to-image', reference_count INTEGER NOT NULL DEFAULT 0,
-                credits_cost INTEGER NOT NULL DEFAULT 0, resolution TEXT NOT NULL DEFAULT 'original', output_size TEXT
+                credits_cost INTEGER NOT NULL DEFAULT 0, resolution TEXT NOT NULL DEFAULT 'original', output_size TEXT,
+                source_size TEXT
             );
             CREATE TABLE IF NOT EXISTS credit_ledger (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id),
@@ -402,7 +403,7 @@ def initialize_database(path: Path, settings: Settings) -> None:
         """)
         migrations = {
             "users": {"credits": "INTEGER NOT NULL DEFAULT 0", "is_admin": "INTEGER NOT NULL DEFAULT 0", "email": "TEXT COLLATE NOCASE", "email_verified_at": "TEXT"},
-            "image_history": {"mode": "TEXT NOT NULL DEFAULT 'text-to-image'", "reference_count": "INTEGER NOT NULL DEFAULT 0", "credits_cost": "INTEGER NOT NULL DEFAULT 0", "resolution": "TEXT NOT NULL DEFAULT 'original'", "output_size": "TEXT"},
+            "image_history": {"mode": "TEXT NOT NULL DEFAULT 'text-to-image'", "reference_count": "INTEGER NOT NULL DEFAULT 0", "credits_cost": "INTEGER NOT NULL DEFAULT 0", "resolution": "TEXT NOT NULL DEFAULT 'original'", "output_size": "TEXT", "source_size": "TEXT"},
             "generation_jobs": {"credits_cost": "INTEGER NOT NULL DEFAULT 1", "prompt": "TEXT"},
         }
         for table, fields in migrations.items():
@@ -492,12 +493,13 @@ def export_dimensions(size: str, resolution: str) -> tuple[int, int] | None:
     return max(2, round(edge * width / height / 2) * 2), edge
 
 
-def prepare_generated_image(data: bytes, target: tuple[int, int] | None) -> tuple[bytes, str, str]:
+def prepare_generated_image(data: bytes, target: tuple[int, int] | None) -> tuple[bytes, str, str, str]:
     extension = image_extension(data)
     try:
         with Image.open(BytesIO(data)) as opened:
+            source_size = f"{opened.width}x{opened.height}"
             if target is None:
-                return data, extension, f"{opened.width}x{opened.height}"
+                return data, extension, source_size, source_size
             image = ImageOps.exif_transpose(opened)
             image.load()
             image = image.convert("RGBA" if image.mode in ("RGBA", "LA") or "transparency" in image.info else "RGB")
@@ -510,7 +512,7 @@ def prepare_generated_image(data: bytes, target: tuple[int, int] | None) -> tupl
         raise HTTPException(502, "图片服务返回了无效图片") from exc
     if len(output) > MAX_OUTPUT_BYTES:
         raise HTTPException(502, "生成图片超过大小限制")
-    return output, "png", f"{target[0]}x{target[1]}"
+    return output, "png", f"{target[0]}x{target[1]}", source_size
 
 
 def decode_reference(value: str) -> tuple[dict[str, str], int]:
@@ -1281,7 +1283,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/images/history")
     def image_history(user=Depends(current_user)):
         with database_connection(database_path) as db:
-            rows = db.execute("SELECT id, prompt, model, size, quality, resolution, output_size, mode, reference_count, credits_cost, image_src, status, created_at FROM image_history WHERE user_id = ? ORDER BY created_at DESC LIMIT 60", (user["id"],)).fetchall()
+            rows = db.execute("SELECT id, prompt, model, size, quality, resolution, output_size, source_size, mode, reference_count, credits_cost, image_src, status, created_at FROM image_history WHERE user_id = ? ORDER BY created_at DESC LIMIT 60", (user["id"],)).fetchall()
         return {"items": [dict(row) for row in rows]}
 
     @app.get("/api/images/files/{item_id}")
@@ -1390,16 +1392,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if len(output) > MAX_OUTPUT_BYTES:
                 raise HTTPException(502, "生成图片超过大小限制")
             try:
-                output, extension, output_size = prepare_generated_image(output, target)
+                output, extension, output_size, source_size = prepare_generated_image(output, target)
             except HTTPException as exc:
                 raise HTTPException(502, exc.detail) from exc
             output_path = image_dir / f"{job_id}.{extension}"
             output_path.write_bytes(output)
             item = {"id": job_id, "prompt": body.prompt, "model": body.model, "size": body.size, "quality": body.quality,
-                    "resolution": body.resolution, "output_size": output_size, "mode": mode, "reference_count": len(references), "credits_cost": credits_cost, "image_src": f"/api/images/files/{job_id}", "status": "succeeded", "created_at": now_iso()}
+                    "resolution": body.resolution, "output_size": output_size, "source_size": source_size, "mode": mode, "reference_count": len(references), "credits_cost": credits_cost, "image_src": f"/api/images/files/{job_id}", "status": "succeeded", "created_at": now_iso()}
             with database_connection(database_path) as db:
-                db.execute("INSERT INTO image_history (id, user_id, prompt, model, size, quality, resolution, output_size, mode, reference_count, credits_cost, image_src, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                           (job_id, user["id"], body.prompt, body.model, body.size, body.quality, body.resolution, output_size, mode, len(references), credits_cost, item["image_src"], "succeeded", item["created_at"]))
+                db.execute("INSERT INTO image_history (id, user_id, prompt, model, size, quality, resolution, output_size, source_size, mode, reference_count, credits_cost, image_src, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                           (job_id, user["id"], body.prompt, body.model, body.size, body.quality, body.resolution, output_size, source_size, mode, len(references), credits_cost, item["image_src"], "succeeded", item["created_at"]))
                 db.execute("UPDATE generation_jobs SET status = 'succeeded' WHERE id = ?", (job_id,))
             return {"item": item, "credits": current_balance(user["id"])}
         except BaseException as exc:

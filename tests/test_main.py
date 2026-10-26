@@ -123,6 +123,7 @@ class AstroGateTests(unittest.TestCase):
                 item = response.json()['item']
                 self.assertEqual(item['resolution'], tier)
                 self.assertEqual(item['output_size'], f'{dimensions[0]}x{dimensions[1]}')
+                self.assertEqual(item['source_size'], '168x94')
                 self.assertEqual(item['credits_cost'], 1)
                 self.assertEqual(self.calls[-1]['size'], item['output_size'])
                 with Image.open(BytesIO(client.get(item['image_src']).content)) as result:
@@ -133,6 +134,7 @@ class AstroGateTests(unittest.TestCase):
             self.assertEqual(self.calls[-1]['size'], '1152x2048')
             self.assertEqual(client.get('/api/wallet').json()['credits'], 0)
             self.assertEqual(client.get('/api/images/history').json()['items'][0]['resolution'], '2K')
+            self.assertEqual(client.get('/api/images/history').json()['items'][0]['source_size'], '168x94')
         self.assertEqual(export_dimensions('1024x1024', '4K'), (3840, 3840))
         self.assertEqual(export_dimensions('1536x864', 'original'), None)
 

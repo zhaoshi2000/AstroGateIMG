@@ -472,7 +472,8 @@ function showResult(item) {
   $('#share-result').href = '/?compose=1&image=' + encodeURIComponent(item.id);
   const modelName = state.models.find((model) => model.id === item.model)?.label || item.model || 'GPT Image 2.5 · 标准';
   const outputLabel = item.output_size ? `${item.resolution && item.resolution !== 'original' ? item.resolution + ' · ' : '实际 · '}${item.output_size.replace('x', '×')}` : item.size;
-  $('#result-meta').replaceChildren(...[item.mode === 'image-to-image' ? `图生图 · ${item.reference_count || 1} 张参考图` : '文生图', modelName, outputLabel, `${item.credits_cost ?? 1} 积分`].map((value) => { const el = document.createElement('span'); el.textContent = value; return el; }));
+  const resizedLabel = item.source_size && item.output_size && item.source_size !== item.output_size ? `模型原图 ${item.source_size.replace('x', '×')} · 已缩放` : null;
+  $('#result-meta').replaceChildren(...[item.mode === 'image-to-image' ? `图生图 · ${item.reference_count || 1} 张参考图` : '文生图', modelName, outputLabel, resizedLabel, `${item.credits_cost ?? 1} 积分`].filter(Boolean).map((value) => { const el = document.createElement('span'); el.textContent = value; return el; }));
 }
 $('#zoom-result').addEventListener('click', () => {
   const source = imageSource(state.activeImageItem?.image_src);

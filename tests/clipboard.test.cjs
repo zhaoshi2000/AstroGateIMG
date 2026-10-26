@@ -184,7 +184,7 @@ async function main() {
   context.fetch = async (url, options = {}) => {
     if (url === '/api/images/generations') {
       submitted = JSON.parse(options.body);
-      return { ok: true, status: 200, json: async () => ({ credits: 1, item: { id: historyId, image_src: historyImage, prompt: submitted.prompt, mode: 'text-to-image', size: submitted.size, credits_cost: 1, created_at: '2026-10-19T10:00:00Z' } }) };
+      return { ok: true, status: 200, json: async () => ({ credits: 1, item: { id: historyId, image_src: historyImage, prompt: submitted.prompt, mode: 'text-to-image', size: submitted.size, resolution: submitted.resolution, output_size: '3840x2160', source_size: '1672x941', credits_cost: 1, created_at: '2026-10-19T10:00:00Z' } }) };
     }
     if (url === '/api/auth/me') return { ok: true, status: 200, json: async () => ({ user: { username: 'artist', credits: 1, is_admin: false } }) };
     throw new Error('Unexpected request: ' + url);
@@ -194,6 +194,7 @@ async function main() {
   assert.equal(submitted.size, '1536x864');
   assert.equal(submitted.resolution, '4K');
   assert.equal(elements.get('#result-prompt').textContent, composed);
+  assert.ok(elements.get('#result-meta').children.some((value) => value.textContent.includes('模型原图 1672×941 · 已缩放')), 'Result distinguishes export pixels from the source image');
   vm.runInContext('setBalance(5)', context);
   let tagCalls = 0;
   context.fetch = async (url, options = {}) => {
