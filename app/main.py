@@ -362,7 +362,7 @@ def initialize_database(path: Path, settings: Settings) -> None:
             CREATE TABLE IF NOT EXISTS generation_jobs (
                 id TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), request_key TEXT NOT NULL,
                 fingerprint TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, error_message TEXT,
-                credits_cost INTEGER NOT NULL DEFAULT 1,
+                credits_cost INTEGER NOT NULL DEFAULT 1, prompt TEXT,
                 UNIQUE(user_id, request_key)
             );
             CREATE TABLE IF NOT EXISTS email_verifications (
@@ -398,7 +398,7 @@ def initialize_database(path: Path, settings: Settings) -> None:
         migrations = {
             "users": {"credits": "INTEGER NOT NULL DEFAULT 0", "is_admin": "INTEGER NOT NULL DEFAULT 0", "email": "TEXT COLLATE NOCASE", "email_verified_at": "TEXT"},
             "image_history": {"mode": "TEXT NOT NULL DEFAULT 'text-to-image'", "reference_count": "INTEGER NOT NULL DEFAULT 0", "credits_cost": "INTEGER NOT NULL DEFAULT 0"},
-            "generation_jobs": {"credits_cost": "INTEGER NOT NULL DEFAULT 1"},
+            "generation_jobs": {"credits_cost": "INTEGER NOT NULL DEFAULT 1", "prompt": "TEXT"},
         }
         for table, fields in migrations.items():
             columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
@@ -406,6 +406,7 @@ def initialize_database(path: Path, settings: Settings) -> None:
                 if name not in columns:
                     db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
         db.execute("CREATE UNIQUE INDEX IF NOT EXISTS users_by_email ON users(email COLLATE NOCASE) WHERE email IS NOT NULL")
+        db.execute("UPDATE generation_jobs SET prompt = (SELECT prompt FROM image_history WHERE image_history.id = generation_jobs.id) WHERE prompt IS NULL AND status = 'succeeded' AND EXISTS (SELECT 1 FROM image_history WHERE image_history.id = generation_jobs.id)")
         if settings.admin_username and settings.admin_password:
             Credentials(username=settings.admin_username, password=settings.admin_password)
             admin = db.execute("SELECT id FROM users WHERE username = ?", (settings.admin_username,)).fetchone()
@@ -456,6 +457,14 @@ def generation_failure_reason(message: str | None) -> str:
     if "额度" in message or "quota" in message.lower():
         return "上游图片额度不足"
     return "上游生成失败，积分已退回"
+
+
+def admin_job_record(row) -> dict[str, Any]:
+    return {"id": row["id"], "user_id": row["user_id"], "username": row["username"],
+            "email": row["email"], "status": row["status"], "created_at": row["created_at"],
+            "credits_cost": row["credits_cost"], "prompt": row["prompt"] or row["saved_prompt"],
+            "image_url": f"/api/admin/images/files/{row['id']}" if row["status"] == "succeeded" and row["image_id"] else None,
+            "failure_reason": generation_failure_reason(row["error_message"]) if row["status"] == "failed" else None}
 
 
 def image_extension(data: bytes) -> str:
@@ -778,6 +787,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/admin/login")
     @app.get("/admin/accounts")
     @app.get("/admin/users")
+    @app.get("/admin/jobs")
     @app.get("/admin/codes")
     def admin_page():
         return FileResponse(STATIC_DIR / "admin.html", headers={"Cache-Control": "no-store"})
@@ -1161,15 +1171,42 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             target = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
             if not target:
                 raise HTTPException(404, "用户不存在")
-            jobs = db.execute("SELECT id, status, created_at, credits_cost, error_message FROM generation_jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT 30", (user_id,)).fetchall()
+            jobs = db.execute("SELECT j.id, j.user_id, j.prompt, j.status, j.created_at, j.credits_cost, j.error_message, h.id AS image_id, h.prompt AS saved_prompt, u.username, u.email FROM generation_jobs j JOIN users u ON u.id = j.user_id LEFT JOIN image_history h ON h.id = j.id WHERE j.user_id = ? ORDER BY j.created_at DESC LIMIT 30", (user_id,)).fetchall()
             ledger = db.execute("SELECT amount, balance_after, kind, description, created_at FROM credit_ledger WHERE user_id = ? ORDER BY id DESC LIMIT 30", (user_id,)).fetchall()
             orders = db.execute("SELECT id, amount_cents, credits, status, created_at, paid_at FROM payment_orders WHERE user_id = ? ORDER BY created_at DESC LIMIT 20", (user_id,)).fetchall()
         return {"user": public_user(target),
-                "jobs": [{"id": row["id"], "status": row["status"], "created_at": row["created_at"],
-                          "credits_cost": row["credits_cost"],
-                          "failure_reason": generation_failure_reason(row["error_message"]) if row["status"] == "failed" else None}
-                         for row in jobs],
+                "jobs": [admin_job_record(row) for row in jobs],
                 "ledger": [dict(row) for row in ledger], "payment_orders": [dict(row) for row in orders]}
+
+    @app.get("/api/admin/jobs")
+    def list_admin_jobs(page: int = 1, status: str = "", user_id: int | None = None, user=Depends(admin_user)):
+        if page < 1 or page > 100000 or status not in ("", "succeeded", "failed", "pending"):
+            raise HTTPException(400, "筛选参数无效")
+        where, params = [], []
+        if status:
+            where.append("j.status = ?")
+            params.append(status)
+        if user_id is not None:
+            where.append("j.user_id = ?")
+            params.append(user_id)
+        clause = " WHERE " + " AND ".join(where) if where else ""
+        with database_connection(database_path) as db:
+            rows = db.execute("SELECT j.id, j.user_id, j.prompt, j.status, j.created_at, j.credits_cost, j.error_message, h.id AS image_id, h.prompt AS saved_prompt, u.username, u.email FROM generation_jobs j JOIN users u ON u.id = j.user_id LEFT JOIN image_history h ON h.id = j.id" + clause + " ORDER BY j.created_at DESC, j.id DESC LIMIT 31 OFFSET ?", (*params, (page - 1) * 30)).fetchall()
+        return {"items": [admin_job_record(row) for row in rows[:30]], "page": page, "has_more": len(rows) > 30}
+
+    @app.get("/api/admin/images/files/{item_id}")
+    def admin_image_file(item_id: str, user=Depends(admin_user)):
+        if not re.fullmatch(r"[0-9a-f]{24}", item_id):
+            raise HTTPException(404, "图片不存在")
+        with database_connection(database_path) as db:
+            item = db.execute("SELECT id FROM image_history WHERE id = ? AND status = 'succeeded'", (item_id,)).fetchone()
+        if not item:
+            raise HTTPException(404, "图片不存在")
+        for extension in ("png", "jpg", "webp"):
+            path = image_dir / f"{item_id}.{extension}"
+            if path.is_file():
+                return FileResponse(path, filename=f"astrogate-{item_id}.{extension}", content_disposition_type="inline", headers={"Cache-Control": "private, no-store"})
+        raise HTTPException(404, "图片不存在")
 
     @app.post("/api/admin/users/{user_id}/credits")
     def adjust_credits(user_id: int, body: CreditAdjustment, user=Depends(admin_user)):
@@ -1234,7 +1271,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 (image_dir / f"{item_id}.{extension}").unlink(missing_ok=True)
         return {"ok": True}
 
-    def reserve(user_id: int, key: str, fingerprint: str, credits_cost: int, model: str, available: bool):
+    def reserve(user_id: int, key: str, fingerprint: str, credits_cost: int, model: str, available: bool, prompt: str):
         with database_connection(database_path) as db:
             db.execute("BEGIN IMMEDIATE")
             previous = db.execute("SELECT * FROM generation_jobs WHERE user_id = ? AND request_key = ?", (user_id, key)).fetchone()
@@ -1251,7 +1288,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if not db.execute("UPDATE users SET credits = credits - ? WHERE id = ? AND credits >= ?", (credits_cost, user_id, credits_cost)).rowcount:
                 raise HTTPException(402, f"积分不足，请先兑换充值；当前模型每张图片需要 {credits_cost} 积分")
             job_id = secrets.token_hex(12)
-            db.execute("INSERT INTO generation_jobs (id, user_id, request_key, fingerprint, status, created_at, credits_cost) VALUES (?, ?, ?, ?, 'pending', ?, ?)", (job_id, user_id, key, fingerprint, now_iso(), credits_cost))
+            db.execute("INSERT INTO generation_jobs (id, user_id, request_key, fingerprint, status, created_at, credits_cost, prompt) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)", (job_id, user_id, key, fingerprint, now_iso(), credits_cost, prompt))
             ledger_entry(db, user_id, -credits_cost, "generation", f"生成图片 · {model} · 1 张", f"generation:{job_id}")
             return job_id, None
 
@@ -1283,7 +1320,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,120}", key):
             raise HTTPException(400, "请求编号无效")
         fingerprint = hash_token(json.dumps(payload, sort_keys=True))
-        job_id, previous = reserve(user["id"], key, fingerprint, credits_cost, body.model, selected_model["available"])
+        job_id, previous = reserve(user["id"], key, fingerprint, credits_cost, body.model, selected_model["available"], body.prompt)
         if previous:
             return {"item": previous, "credits": current_balance(user["id"])}
         output_path = None

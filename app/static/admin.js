@@ -1,15 +1,29 @@
 (() => {
   'use strict';
   const $ = (selector) => document.querySelector(selector);
-  const pages = { overview: ['运营概览', '上游额度、用户与图片服务运行情况。'], accounts: ['上游账号池', '查看账号剩余图片次数、重置时间与运行状态。'], users: ['用户与积分', '查询客户账号，管理可用积分。'], codes: ['兑换码管理', '生成充值兑换码，查看使用情况。'] };
+  const pages = { overview: ['运营概览', '上游额度、用户与图片服务运行情况。'], accounts: ['上游账号池', '查看账号剩余图片次数、重置时间与运行状态。'], users: ['用户与积分', '查询客户账号，管理可用积分。'], jobs: ['出图审核', '查看完整提示词、生成图片和失败原因。'], codes: ['兑换码管理', '生成充值兑换码，查看使用情况。'] };
   const route = location.pathname.split('/')[2]; const page = pages[route] ? route : 'overview';
-  const state = { accounts: [], selected: new Set(), refreshing: false, user: null };
+  const state = { accounts: [], selected: new Set(), refreshing: false, user: null, jobsPage: 1 };
   function el(tag, className, text) { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = String(text); return node; }
   function td(value, className = '') { return el('td', className, value ?? '—'); }
   function date(value) { if (!value) return '上游未提供'; try { const raw = value.includes('T') ? value : value.replace(' ', 'T') + 'Z'; return new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(raw)); } catch { return '—'; } }
   const statusClass = { '正常': 'normal', '限流': 'limited', '异常': 'abnormal', '未知': 'abnormal', '禁用': 'disabled', succeeded: 'normal', pending: 'limited', failed: 'abnormal' };
   const statusText = { succeeded: '已完成', pending: '生成中', failed: '未完成' };
   function badge(value) { return el('span', 'status ' + (statusClass[value] || ''), statusText[value] || value); }
+  function promptCell(job) { return el('div', 'review-prompt', job.prompt || '旧任务未保存提示词'); }
+  function imageCell(job) {
+    if (!job.image_url) return el('span', 'muted', job.status === 'succeeded' ? '图片已删除' : '未生成图片');
+    const link = el('a', 'review-image-link'); link.href = job.image_url; link.target = '_blank'; link.rel = 'noopener'; link.setAttribute('aria-label', '打开生成图片原图');
+    const image = el('img'); image.src = job.image_url; image.alt = '任务 ' + job.id + ' 生成的图片'; image.loading = 'lazy'; link.append(image); return link;
+  }
+  function reviewCard(job) {
+    const card = el('article', 'review-card'); const info = el('div', 'review-card-info');
+    const head = el('div', 'review-card-head'); head.append(el('strong', '', job.email || job.username), badge(job.status), el('span', 'muted', date(job.created_at)), el('code', '', job.id));
+    const title = el('h3', '', '完整提示词'); info.append(head, title, promptCell(job));
+    if (job.failure_reason) info.append(el('p', 'review-error', job.failure_reason + ' · 积分已退回'));
+    info.append(el('small', 'muted', `本次计价 ${job.credits_cost} 积分`));
+    const art = el('div', 'review-card-art'); art.append(imageCell(job)); card.append(info, art); return card;
+  }
   let toastTimer;
   function toast(message, error = false) { $('#admin-toast').textContent = message; $('#admin-toast').classList.toggle('error', error); $('#admin-toast').classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#admin-toast').classList.remove('show'), error ? 6500 : 3500); }
   function showLogin(message = '') { state.user = null; $('#admin-loading').classList.add('hidden'); $('#admin-shell').classList.add('hidden'); $('#admin-login-view').classList.remove('hidden'); $('#admin-login-error').textContent = message; }
@@ -93,25 +107,41 @@
     const result = await api(`/api/admin/users/${userId}/records`);
     $('#user-records-title').textContent = `${result.user.email || result.user.username} · 用户记录`;
     $('#user-records-summary').textContent = `当前余额 ${result.user.credits} 积分 · 最近 30 笔出图任务、30 笔积分流水、20 笔充值订单`;
+    $('#user-all-jobs').href = `/admin/jobs?user_id=${result.user.id}`;
     $('#user-records-jobs').replaceChildren(...result.jobs.map((job) => {
       const row = el('tr'); const status = td(); status.textContent = ''; status.append(badge(job.status));
-      row.append(td(job.id.slice(0, 12)), status, td(job.credits_cost), td(job.failure_reason || '—', 'job-reason'), td(date(job.created_at))); return row;
+      const prompt = td(); prompt.textContent = ''; prompt.append(promptCell(job));
+      const image = td(); image.textContent = ''; image.append(imageCell(job));
+      row.append(td(job.id.slice(0, 12)), status, td(job.credits_cost), prompt, image, td(job.failure_reason || '—', 'job-reason'), td(date(job.created_at))); return row;
     }));
     $('#user-records-ledger').replaceChildren(...result.ledger.map((entry) => { const row = el('tr'); row.append(td(date(entry.created_at)), td(entry.amount > 0 ? `+${entry.amount}` : entry.amount), td(entry.balance_after), td(entry.description)); return row; }));
     $('#user-records-orders').replaceChildren(...result.payment_orders.map((order) => { const row = el('tr'); row.append(td(order.id), td(`¥${(order.amount_cents / 100).toFixed(2)}`), td(order.credits), td(order.status === 'paid' ? '已到账' : '待支付'), td(date(order.created_at))); return row; }));
     $('#user-records-panel').classList.remove('hidden'); $('#user-records-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+  async function loadJobs() {
+    const params = new URLSearchParams({ page: String(state.jobsPage) });
+    const userId = $('#job-user-filter').value.trim(); const status = $('#job-status-filter').value;
+    if (userId) params.set('user_id', userId);
+    if (status) params.set('status', status);
+    const result = await api('/api/admin/jobs?' + params.toString());
+    $('#admin-jobs-list').replaceChildren(...result.items.map(reviewCard));
+    $('#admin-jobs-empty').classList.toggle('hidden', result.items.length > 0);
+    $('#jobs-page').textContent = `第 ${result.page} 页`;
+    $('#jobs-prev').disabled = result.page <= 1;
+    $('#jobs-next').disabled = !result.has_more;
   }
   async function loadCodes() {
     const result = await api('/api/admin/codes');
     $('#admin-codes').replaceChildren(...result.items.map((code) => { const row = el('tr'); const status = code.redeemed_username ? '已兑换' : new Date(code.expires_at) <= new Date() ? '已过期' : '未使用'; row.append(td(code.id), td('…' + code.suffix), td(code.credits), td(status), td(code.redeemed_username || '—'), td(date(code.expires_at))); return row; }));
     $('#codes-empty').classList.toggle('hidden', result.items.length > 0);
   }
-  async function loadPage() { if (page === 'overview') { const results = await Promise.allSettled([loadOverview(), loadAccounts()]); results.forEach((result) => { if (result.status === 'rejected') toast(result.reason.message, true); }); } else if (page === 'accounts') await loadAccounts(); else if (page === 'users') await loadUsers(); else await loadCodes(); }
+  async function loadPage() { if (page === 'overview') { const results = await Promise.allSettled([loadOverview(), loadAccounts()]); results.forEach((result) => { if (result.status === 'rejected') toast(result.reason.message, true); }); } else if (page === 'accounts') await loadAccounts(); else if (page === 'users') await loadUsers(); else if (page === 'jobs') await loadJobs(); else await loadCodes(); }
   async function enter(user) {
     state.user = user; $('#admin-loading').classList.add('hidden'); $('#admin-login-view').classList.add('hidden'); $('#admin-shell').classList.remove('hidden'); $('#admin-name').textContent = user.username;
     $('#admin-page-title').textContent = pages[page][0]; $('#admin-page-description').textContent = pages[page][1]; $('#admin-breadcrumb').textContent = pages[page][0];
     document.querySelectorAll('[data-page]').forEach((link) => link.classList.toggle('active', link.dataset.page === page));
     Object.keys(pages).forEach((name) => $('#' + name + '-section').classList.toggle('hidden', name !== page));
+    if (page === 'jobs') $('#job-user-filter').value = new URLSearchParams(location.search).get('user_id') || '';
     if (location.pathname === '/admin/login') history.replaceState(null, '', '/admin');
     await loadPage();
   }
@@ -123,6 +153,10 @@
   $('#refresh-selected').addEventListener('click', () => { if (state.selected.size) refreshQuota([...state.selected]); }); $('#refresh-upstream').addEventListener('click', () => refreshQuota([]));
   $('#admin-user-search-form').addEventListener('submit', (event) => { event.preventDefault(); loadUsers().catch((error) => toast(error.message, true)); });
   $('#close-user-records').addEventListener('click', () => $('#user-records-panel').classList.add('hidden'));
+  $('#job-filter-form').addEventListener('submit', (event) => { event.preventDefault(); state.jobsPage = 1; loadJobs().catch((error) => toast(error.message, true)); });
+  $('#job-filter-clear').addEventListener('click', () => { $('#job-user-filter').value = ''; $('#job-status-filter').value = ''; state.jobsPage = 1; loadJobs().catch((error) => toast(error.message, true)); });
+  $('#jobs-prev').addEventListener('click', () => { if (state.jobsPage > 1) { state.jobsPage--; loadJobs().catch((error) => toast(error.message, true)); } });
+  $('#jobs-next').addEventListener('click', () => { state.jobsPage++; loadJobs().catch((error) => toast(error.message, true)); });
   $('#admin-code-form').addEventListener('submit', async (event) => { event.preventDefault(); const button = event.target.querySelector('button'); button.disabled = true; try { const result = await api('/api/admin/codes', { method: 'POST', body: JSON.stringify({ credits: Number($('#code-credits').value), count: Number($('#code-count').value), expires_days: Number($('#code-days').value) }) }); $('#new-admin-code-text').value = result.codes.join('\n'); $('#new-admin-codes').classList.remove('hidden'); await loadCodes(); toast('兑换码已生成，请保存完整内容'); } catch (error) { toast(error.message, true); } finally { button.disabled = false; } });
   $('#copy-admin-codes').addEventListener('click', async () => { try { await navigator.clipboard.writeText($('#new-admin-code-text').value); toast('兑换码已复制'); } catch { $('#new-admin-code-text').focus(); $('#new-admin-code-text').select(); toast('请按 Ctrl + C 复制选中的兑换码'); } });
   setInterval(() => { if (state.user && !state.refreshing && document.visibilityState === 'visible' && ['overview', 'accounts'].includes(page)) loadAccounts().catch(() => {}); }, 30000);

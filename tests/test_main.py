@@ -80,6 +80,17 @@ class AstroGateTests(unittest.TestCase):
             history = client.get('/api/images/history').json()['items']
             self.assertEqual(len(history), 1)
             self.assertEqual(history[0]['mode'], 'image-to-image')
+            self.login(client, 'operator')
+            review = client.get('/api/admin/jobs').json()['items'][0]
+            self.assertEqual(review['prompt'], payload['prompt'])
+            self.assertEqual(review['image_url'], '/api/admin/images/files/' + data['item']['id'])
+            self.assertEqual(client.get(review['image_url']).content, base64.b64decode(PNG))
+            self.assertEqual(client.get('/api/admin/jobs?status=failed').json()['items'], [])
+        with database_connection(Path(self.directory.name) / 'astrogate.db') as db:
+            db.execute("UPDATE generation_jobs SET prompt = NULL WHERE id = ?", (data['item']['id'],))
+        with TestClient(self.app()) as client:
+            self.login(client, 'operator')
+            self.assertEqual(client.get('/api/admin/jobs').json()['items'][0]['prompt'], payload['prompt'])
 
     def test_widescreen_and_phone_ratios_reach_both_image_endpoints(self):
         with TestClient(self.app(2)) as client:
@@ -103,6 +114,10 @@ class AstroGateTests(unittest.TestCase):
             self.assertEqual(wallet['credits'], 1)
             self.assertEqual([item['amount'] for item in wallet['ledger'][:2]], [1, -1])
             self.assertEqual(client.get('/api/images/history').json()['items'], [])
+            self.login(client, 'operator')
+            review = client.get('/api/admin/jobs?status=failed').json()['items'][0]
+            self.assertEqual(review['prompt'], 'blue circle')
+            self.assertIsNone(review['image_url'])
 
     def test_invalid_reference_does_not_charge(self):
         with TestClient(self.app(2)) as client:
@@ -133,6 +148,8 @@ class AstroGateTests(unittest.TestCase):
             client.post('/api/auth/logout')
             self.register(client, 'other_artist')
             self.assertEqual(client.get(item['image_src']).status_code, 404)
+            self.assertEqual(client.get('/api/admin/jobs').status_code, 403)
+            self.assertEqual(client.get('/api/admin/images/files/' + item['id']).status_code, 403)
             self.assertEqual(client.delete('/api/images/history/' + item['id']).status_code, 404)
             self.assertEqual(client.get('/api/images/history').json()['items'], [])
 
