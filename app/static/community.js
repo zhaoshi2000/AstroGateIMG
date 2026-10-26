@@ -44,7 +44,6 @@
     if (post.example_likes_count) body.append(element('small', 'card-example-note', `含 ${post.example_likes_count} 示例赞`));
     const preview = action('gallery-comment-preview', '', 'commentPost', post.id); const line = element('span', 'gallery-comment-text');
     if (post.comment_preview) {
-      if (post.comment_preview.is_example) line.append(element('span', 'example-tag', '示例评论'));
       line.append(element('strong', '', post.comment_preview.author + '：'), document.createTextNode(post.comment_preview.content));
     } else line.append(document.createTextNode('还没有评论，来聊聊你的想法 →'));
     preview.append(line);
@@ -81,14 +80,13 @@
     $('#detail-comment-count').textContent = state.selected.comments_count;
     $('#detail-comments').replaceChildren(...state.comments.map((comment) => {
       const item = element('article', 'comment-item'); const body = element('div', 'comment-body'); const byline = element('div', 'comment-byline'); byline.append(element('strong', '', comment.author));
-      if (comment.is_example) byline.append(element('span', 'example-tag', '示例评论'));
-      else { const time = element('time', '', formatDate(comment.created_at)); time.dateTime = comment.created_at; byline.append(time); }
+      if (comment.created_at) { const time = element('time', '', formatDate(comment.created_at)); time.dateTime = comment.created_at; byline.append(time); }
       body.append(byline, element('p', '', comment.content));
       if (comment.can_delete) body.append(action('delete-comment', '删除评论', 'deleteComment', String(comment.id)));
       item.append(element('span', 'comment-avatar', Array.from(comment.author)[0] || '友'), body); return item;
     }));
     if (!state.comments.length) $('#detail-comments').append(element('p', 'discussion-loading', '还没有评论，成为第一个分享想法的人。'));
-    if (state.selected.comments_count > state.comments.length) $('#detail-comments').append(element('p', 'discussion-loading', '展示最近 100 条用户评论与示例讨论。'));
+    if (state.selected.comments_count > state.comments.length) $('#detail-comments').append(element('p', 'discussion-loading', '目前展示最近 100 条用户评论。'));
   }
   function fillDetail(post) {
     $('#detail-title').textContent = post.title; $('#detail-image').src = post.image || '/assets/mark.svg'; $('#detail-image').alt = post.alt;
@@ -100,7 +98,7 @@
     $('#detail-author-note').textContent = post.is_curated ? '精选作品发布者' : `社区创作者 · ${formatDate(post.created_at)}`;
     $('#detail-content').textContent = post.content || ''; $('#detail-content').classList.toggle('is-hidden', !post.content);
     $('#delete-post').classList.toggle('is-hidden', !post.can_delete); $('#delete-post').disabled = false;
-    $('#detail-example-note').textContent = post.example_likes_count ? `含 ${post.example_likes_count} 个示例赞，其余为用户点赞；标注的示例评论用于展示。` : '';
+    $('#detail-example-note').textContent = post.example_likes_count ? `这篇精选作品包含预置的展示互动；用户发布的点赞和评论会真实保存。` : '';
     $('#detail-example-note').classList.toggle('is-hidden', !post.example_likes_count);
     $('#detail-prompt-section').classList.toggle('is-hidden', !post.prompt); $('#prompt-explanation').textContent = post.is_curated ? '根据这张作品的主体、风格与构图编写' : '由发布者分享的创作提示词';
     $('#detail-tags').replaceChildren(...tags(post).childNodes); $('#detail-prompt').textContent = post.prompt;
