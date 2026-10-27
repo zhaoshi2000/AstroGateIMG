@@ -112,6 +112,16 @@ docker compose up -d --build
 
 部署目录中的 `data/astrogate.db` 保存用户、会话、积分、兑换码和流水；`data/images/` 保存生成图片。请为整个 `data/` 目录配置持久化和备份。应用目前必须使用一个 worker；进程启动会退款此前中断的生成任务。
 
+### 异机备份
+
+`deploy/backup_stream.sh` 在生产机生成私有备份流，包含应用和上游源码、两套配置文件、用户与作品数据、账号池数据。它使用 SQLite 在线备份并检查数据库完整性，可在网站运行时执行。建议只通过受限 SSH 公钥调用此脚本：
+
+```text
+command="/usr/local/sbin/astrogate-img-backup-stream",restrict ssh-ed25519 <备份机公钥>
+```
+
+备份机运行 `deploy/backup_pull.sh`，设置 `ASTROGATE_BACKUP_SSH_TARGET`、`ASTROGATE_BACKUP_SSH_KEY` 和 `ASTROGATE_BACKUP_DIR`。脚本验证归档、保存 SHA-256 校验文件，并清理超过 30 天的日常备份。备份含账号凭据和支付配置，备份目录及归档必须仅允许备份账号访问；不要提交到 Git。
+
 `deploy/configure_ingress.py` 用于当前服务器的 HAProxy + nginx 结构，会备份并校验配置后添加 `img.astrogate.sbs` 的独立路由，不适用于任意服务器配置。
 
 ## 上游要求
