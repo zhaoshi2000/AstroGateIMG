@@ -11,6 +11,8 @@ chmod 700 "$staging"
 for name in app upstream data upstream-data proxy-runtime systemd; do
     mkdir -p "$staging/$name"
 done
+mkdir -p "$staging/host-config/nginx" "$staging/host-config/postfix" \
+    "$staging/host-config/docker" "$staging/host-config/mail-relay"
 
 rsync -a "$root/app/" "$staging/app/"
 rsync -a "$root/upstream/" "$staging/upstream/"
@@ -24,6 +26,23 @@ if [ -d "$root/proxy-runtime" ]; then
 fi
 if [ -f /etc/systemd/system/astrogate-img-proxy.service ]; then
     cp -p /etc/systemd/system/astrogate-img-proxy.service "$staging/systemd/"
+fi
+if [ -f /etc/systemd/system/astrogate-img-mail-relay.service ]; then
+    cp -p /etc/systemd/system/astrogate-img-mail-relay.service "$staging/systemd/"
+fi
+if [ -f /etc/nginx/sites-available/img.astrogate.sbs ]; then
+    cp -p /etc/nginx/sites-available/img.astrogate.sbs "$staging/host-config/nginx/"
+fi
+if [ -f /etc/postfix/main.cf ]; then
+    cp -p /etc/postfix/main.cf "$staging/host-config/postfix/"
+fi
+if [ -f /etc/systemd/system/docker.service.d/astrogate-proxy.conf ]; then
+    cp -p /etc/systemd/system/docker.service.d/astrogate-proxy.conf \
+        "$staging/host-config/docker/"
+fi
+if [ -f /etc/astrogate-img/mail-relay-key ]; then
+    cp -p /etc/astrogate-img/mail-relay-key \
+        /etc/astrogate-img/mail-relay-key.pub "$staging/host-config/mail-relay/"
 fi
 cp -p "$root/.env" "$root/.upstream.env" "$root/compose.yml" \
     "$root/compose.upstream.yml" "$root/Dockerfile" \

@@ -1,0 +1,14 @@
+[Unit]
+Description=AstroGate IMG restricted SMTP tunnel
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ssh -N -T -L 127.0.0.1:2525:127.0.0.1:25 -i /etc/astrogate-img/mail-relay-key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 img-mail-relay@23.94.184.57
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

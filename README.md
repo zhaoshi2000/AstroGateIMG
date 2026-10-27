@@ -44,7 +44,7 @@ ASTROGATE_SMTP_SENDER=noreply@astrogate.sbs
 
 管理员账号首次启动时创建；已有账号不会被环境变量重置密码。
 
-注册需要能发信的 SMTP 服务。当前生产环境使用同机 Postfix（127.0.0.1:25）发送 `noreply@astrogate.sbs` 的验证码邮件。使用其他邮箱供应商时填写 `ASTROGATE_SMTP_USERNAME`、`ASTROGATE_SMTP_PASSWORD`，并按供应商要求选择 `starttls`（一般 587）或 `ssl`（一般 465）。HMAC 密钥可通过 `ASTROGATE_EMAIL_CODE_SECRET` 设置，留空时自动生成到数据目录并持久保存。
+注册需要能发信的 SMTP 服务。当前生产环境使用同机 Postfix（127.0.0.1:25）发送 `noreply@astrogate.sbs` 的验证码邮件；新主机的 Postfix 通过 `deploy/astrogate-img-mail-relay.service` 的受限 SSH 隧道连接旧邮件机，避免将新主机 IP 加入邮件中继白名单。使用其他邮箱供应商时填写 `ASTROGATE_SMTP_USERNAME`、`ASTROGATE_SMTP_PASSWORD`，并按供应商要求选择 `starttls`（一般 587）或 `ssl`（一般 465）。HMAC 密钥可通过 `ASTROGATE_EMAIL_CODE_SECRET` 设置，留空时自动生成到数据目录并持久保存。
 
 同机 Postfix 需要在 `smtpd_relay_restrictions` 和 `smtpd_recipient_restrictions` 中允许 `permit_mynetworks`，且放在 `reject_unauth_destination` 前面；`mynetworks` 保持为本机回环地址。部署后需要向外部邮箱实际投递验证，本域邮箱投递成功不能证明外部投递可用。
 
@@ -114,7 +114,7 @@ docker compose up -d --build
 
 ### 异机备份
 
-`deploy/backup_stream.sh` 在生产机生成私有备份流，包含应用和上游源码、两套配置文件、用户与作品数据、账号池数据，以及独立图片代理配置。它使用 SQLite 在线备份并检查数据库完整性，可在网站运行时执行。建议只通过受限 SSH 公钥调用此脚本：
+`deploy/backup_stream.sh` 在生产机生成私有备份流，包含应用和上游源码、两套配置文件、用户与作品数据、账号池数据、独立图片代理，以及 nginx、Postfix、Docker 代理的主机配置。它使用 SQLite 在线备份并检查数据库完整性，可在网站运行时执行。建议只通过受限 SSH 公钥调用此脚本：
 
 ```text
 command="/usr/local/sbin/astrogate-img-backup-stream",restrict ssh-ed25519 <备份机公钥>
