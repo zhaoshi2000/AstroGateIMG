@@ -114,7 +114,7 @@ docker compose up -d --build
 
 ### 异机备份
 
-`deploy/backup_stream.sh` 在生产机生成私有备份流，包含应用和上游源码、两套配置文件、用户与作品数据、账号池数据。它使用 SQLite 在线备份并检查数据库完整性，可在网站运行时执行。建议只通过受限 SSH 公钥调用此脚本：
+`deploy/backup_stream.sh` 在生产机生成私有备份流，包含应用和上游源码、两套配置文件、用户与作品数据、账号池数据，以及独立图片代理配置。它使用 SQLite 在线备份并检查数据库完整性，可在网站运行时执行。建议只通过受限 SSH 公钥调用此脚本：
 
 ```text
 command="/usr/local/sbin/astrogate-img-backup-stream",restrict ssh-ed25519 <备份机公钥>

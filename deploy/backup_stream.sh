@@ -8,7 +8,7 @@ staging=$(mktemp -d /tmp/astrogate-img-backup.XXXXXXXX)
 trap 'rm -rf "$staging"' EXIT
 chmod 700 "$staging"
 
-for name in app upstream data upstream-data; do
+for name in app upstream data upstream-data proxy-runtime systemd; do
     mkdir -p "$staging/$name"
 done
 
@@ -18,6 +18,13 @@ rsync -a --exclude='*.db' --exclude='*.db-*' \
     --exclude='*.sqlite3' --exclude='*.sqlite3-*' \
     "$root/data/" "$staging/data/"
 rsync -a "$root/upstream-data/" "$staging/upstream-data/"
+if [ -d "$root/proxy-runtime" ]; then
+    rsync -a --exclude='cache.db' --exclude='config.full-before-us-only.yaml' \
+        "$root/proxy-runtime/" "$staging/proxy-runtime/"
+fi
+if [ -f /etc/systemd/system/astrogate-img-proxy.service ]; then
+    cp -p /etc/systemd/system/astrogate-img-proxy.service "$staging/systemd/"
+fi
 cp -p "$root/.env" "$root/.upstream.env" "$root/compose.yml" \
     "$root/compose.upstream.yml" "$root/Dockerfile" \
     "$root/requirements.txt" "$staging/"

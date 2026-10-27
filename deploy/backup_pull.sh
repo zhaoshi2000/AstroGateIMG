@@ -13,7 +13,7 @@ archive="$dest/astrogate-img-$stamp.tar.gz"
 partial="$archive.partial"
 trap 'rm -f "$partial"' EXIT
 
-ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -i "$key" "$target" > "$partial"
+ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes -i "$key" "$target" > "$partial"
 tar -tzf "$partial" >/dev/null
 mv "$partial" "$archive"
 sha256sum "$archive" > "$archive.sha256"
