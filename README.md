@@ -122,7 +122,9 @@ command="/usr/local/sbin/astrogate-img-backup-stream",restrict ssh-ed25519 <备�
 
 备份机运行 `deploy/backup_pull.sh`，设置 `ASTROGATE_BACKUP_SSH_TARGET`、`ASTROGATE_BACKUP_SSH_KEY` 和 `ASTROGATE_BACKUP_DIR`。脚本验证归档、保存 SHA-256 校验文件，并清理超过 30 天的日常备份。备份含账号凭据和支付配置，备份目录及归档必须仅允许备份账号访问；不要提交到 Git。
 
-`deploy/configure_ingress.py` 用于当前服务器的 HAProxy + nginx 结构，会备份并校验配置后添加 `img.astrogate.sbs` 的独立路由，不适用于任意服务器配置。
+`deploy/configure_proxy_fallback.py` 从私有的 Clash 订阅 YAML 中仅选取新加坡、日本、美国节点，排在独立代理的主节点之后。代理配置与订阅地址含凭据，应保存在服务器私有目录，不能提交到 Git。更新配置后先用 `mihomo -t -f <配置文件>` 校验，再重启独立代理服务。
+
+`deploy/configure_ingress.py` 用于旧 HAProxy + nginx 结构，会备份并校验配置后添加 `img.astrogate.sbs` 的独立路由，不适用于任意服务器配置。
 
 ## 上游要求
 
