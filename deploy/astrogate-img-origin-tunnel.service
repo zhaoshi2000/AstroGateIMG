@@ -1,0 +1,14 @@
+[Unit]
+Description=AstroGate IMG origin tunnel
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ssh -N -T -L 127.0.0.1:43922:127.0.0.1:43921 -i /etc/astrogate-img/img-origin-tunnel -o BatchMode=yes -o IdentitiesOnly=yes -o UserKnownHostsFile=/etc/astrogate-img/img-origin-known-hosts -o StrictHostKeyChecking=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 img-origin@211.154.18.38
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

@@ -12,7 +12,8 @@ for name in app upstream data upstream-data proxy-runtime systemd; do
     mkdir -p "$staging/$name"
 done
 mkdir -p "$staging/host-config/nginx" "$staging/host-config/postfix" \
-    "$staging/host-config/docker" "$staging/host-config/mail-relay"
+    "$staging/host-config/docker" "$staging/host-config/mail-relay" \
+    "$staging/host-config/ip-access"
 
 rsync -a "$root/app/" "$staging/app/"
 rsync -a "$root/upstream/" "$staging/upstream/"
@@ -33,6 +34,9 @@ fi
 if [ -f /etc/nginx/sites-available/img.astrogate.sbs ]; then
     cp -p /etc/nginx/sites-available/img.astrogate.sbs "$staging/host-config/nginx/"
 fi
+if [ -f /etc/nginx/sites-available/astrogate-img-ip ]; then
+    cp -p /etc/nginx/sites-available/astrogate-img-ip "$staging/host-config/nginx/"
+fi
 if [ -f /etc/postfix/main.cf ]; then
     cp -p /etc/postfix/main.cf "$staging/host-config/postfix/"
 fi
@@ -43,6 +47,10 @@ fi
 if [ -f /etc/astrogate-img/mail-relay-key ]; then
     cp -p /etc/astrogate-img/mail-relay-key \
         /etc/astrogate-img/mail-relay-key.pub "$staging/host-config/mail-relay/"
+fi
+if [ -f /etc/astrogate-img/ip-access.key ] && [ -f /etc/astrogate-img/ip-access.crt ]; then
+    cp -p /etc/astrogate-img/ip-access.key /etc/astrogate-img/ip-access.crt \
+        "$staging/host-config/ip-access/"
 fi
 cp -p "$root/.env" "$root/.upstream.env" "$root/compose.yml" \
     "$root/compose.upstream.yml" "$root/Dockerfile" \
