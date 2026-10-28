@@ -4,15 +4,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
-import io
 import hashlib
+import io
 import json
 import re
 import secrets
 import sqlite3
-from contextlib import contextmanager
 import time
-from pathlib import Path
+from contextlib import closing, contextmanager
 
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -100,7 +99,7 @@ def create_gateway_router(config) -> APIRouter:
             raise HTTPException(400, "JSON object required")
         return value
 
-    def client(timeout=240):
+    def client(timeout=840):
         return httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10),
                                  transport=config.upstream_transport, trust_env=False, follow_redirects=False,
                                  headers={"Authorization": "Bearer " + config.upstream_api_key})
@@ -237,6 +236,43 @@ def create_gateway_router(config) -> APIRouter:
     @router.post("/internal/astrogate/v1/images/edits")
     async def edit_image(request: Request, authorization: str | None = Header(default=None)):
         return await generate(request, authorization, True)
+
+    @router.get("/internal/astrogate/v1/images/jobs/{request_id}")
+    async def get_image_job(request_id: str, authorization: str | None = Header(default=None)):
+        authenticate(authorization)
+        if not re.fullmatch(r"[0-9a-f]{64}", request_id):
+            raise HTTPException(400, "Invalid gateway request ID")
+        database = config.data_dir / "gateway-bridge.sqlite3"
+        if not database.is_file():
+            return {"status": "missing"}
+        with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=10)) as db:
+            row = db.execute("SELECT status,result FROM image_jobs WHERE id=?", (request_id,)).fetchone()
+        if row is None:
+            return {"status": "missing"}
+        if row[0] != "succeeded":
+            return {"status": "pending" if row[0] == "pending" else "unknown"}
+        try:
+            result = json.loads(row[1])
+            items = result["data"]
+            if not isinstance(items, list) or not 1 <= len(items) <= 4:
+                return {"status": "unavailable"}
+            size = 0
+            for item in items:
+                filename = item.pop("filename")
+                if not isinstance(filename, str) or not re.fullmatch(r"[0-9a-f]{48}\.(?:png|jpg|webp)", filename):
+                    return {"status": "unavailable"}
+                path = assets / filename
+                if path.is_symlink() or not path.is_file() or path.stat().st_mtime < time.time() - ASSET_LIFETIME:
+                    return {"status": "expired"}
+                with path.open("rb") as image:
+                    data = image.read(MAX_OUTPUT - size + 1)
+                if not data or len(data) > MAX_OUTPUT - size:
+                    return {"status": "unavailable"}
+                size += len(data)
+                item["b64_json"] = base64.b64encode(data).decode()
+        except (ValueError, TypeError, KeyError, OSError, AttributeError):
+            return {"status": "unavailable"}
+        return {"status": "succeeded", "result": result}
 
     @router.get("/gateway-assets/{filename}")
     async def download_asset(filename: str):

@@ -1,9 +1,12 @@
 import base64
 import io
 import json
+import sqlite3
+import unittest
+from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import unittest
+from unittest.mock import patch
 
 import httpx
 from fastapi.testclient import TestClient
@@ -104,6 +107,44 @@ class GatewayBridgeTests(unittest.TestCase):
             self.assertEqual(len(self.calls), 1)
             mismatch = client.post("/internal/astrogate/v1/images/generations", headers=self.headers(), json={**payload, "prompt": "different"})
             self.assertEqual(mismatch.status_code, 409)
+
+    def test_image_job_lookup_is_read_only_and_returns_saved_result(self):
+        request_id = "b" * 64
+        path = "/internal/astrogate/v1/images/jobs/" + request_id
+        with TestClient(self.app()) as client:
+            self.assertEqual(client.get(path).status_code, 401)
+            self.assertEqual(client.get(path, headers=self.headers()).json(), {"status": "missing"})
+            self.assertFalse((Path(self.directory.name) / "gateway-bridge.sqlite3").exists())
+            self.assertEqual(client.get(path[:-1] + "z", headers=self.headers()).status_code, 400)
+            first = client.post("/internal/astrogate/v1/images/generations", headers=self.headers(),
+                                json={"prompt": "blue logo", "gateway_request_id": request_id})
+            recovered = client.get(path, headers=self.headers())
+            self.assertEqual(recovered.status_code, 200)
+            self.assertEqual(recovered.json(), {"status": "succeeded", "result": first.json()})
+            self.assertEqual(len(self.calls), 1)
+            for secret in (BRIDGE_KEY, UPSTREAM_KEY):
+                self.assertNotIn(secret, recovered.text)
+
+    def test_image_job_lookup_distinguishes_pending_expired_and_unsafe_results(self):
+        pending_id, done_id = "c" * 64, "d" * 64
+        path = "/internal/astrogate/v1/images/jobs/"
+        with TestClient(self.app()) as client:
+            self.fail_image = True
+            self.assertEqual(client.post("/internal/astrogate/v1/images/generations", headers=self.headers(),
+                json={"prompt": "pending", "gateway_request_id": pending_id}).status_code, 502)
+            self.assertEqual(client.get(path + pending_id, headers=self.headers()).json(), {"status": "pending"})
+            self.fail_image = False
+            saved = client.post("/internal/astrogate/v1/images/generations", headers=self.headers(),
+                json={"prompt": "done", "gateway_request_id": done_id}).json()
+            with patch("app.gateway_bridge.MAX_OUTPUT", 10):
+                self.assertEqual(client.get(path + done_id, headers=self.headers()).json(), {"status": "unavailable"})
+            filename = saved["data"][0]["url"].rsplit("/", 1)[1]
+            (Path(self.directory.name) / "gateway-assets" / filename).unlink()
+            self.assertEqual(client.get(path + done_id, headers=self.headers()).json(), {"status": "expired"})
+            with closing(sqlite3.connect(Path(self.directory.name) / "gateway-bridge.sqlite3")) as db, db:
+                db.execute("UPDATE image_jobs SET result=? WHERE id=?", (json.dumps({"data": [{"filename": "../../secret"}]}), done_id))
+            self.assertEqual(client.get(path + done_id, headers=self.headers()).json(), {"status": "unavailable"})
+            self.assertEqual(len(self.calls), 2)
 
     def test_gateway_model_discovery_and_image_streams(self):
         with TestClient(self.app()) as client:
