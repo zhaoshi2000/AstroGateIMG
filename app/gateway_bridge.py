@@ -135,6 +135,14 @@ def create_gateway_router(config) -> APIRouter:
         except (ValueError, TypeError, binascii.Error, OSError, Image.DecompressionBombError):
             raise HTTPException(502, "Image upstream returned an invalid image") from None
 
+    def pixel_hash(data):
+        try:
+            with Image.open(io.BytesIO(data)) as image:
+                rgb = image.convert("RGB")
+                return rgb.size, hashlib.sha256(rgb.tobytes()).digest()
+        except (ValueError, OSError, Image.DecompressionBombError):
+            raise HTTPException(502, "Image upstream returned an invalid image") from None
+
     def image_response(result, request_id, stream, edit):
         headers = {"X-Request-ID": request_id} if request_id else {}
         if stream:
@@ -205,10 +213,20 @@ def create_gateway_router(config) -> APIRouter:
         async with client() as http:
             result = await upstream_json(http, "POST", "/v1/images/" + ("edits" if edit else "generations"), payload)
         items = result.get("data") if isinstance(result, dict) else None
-        if not isinstance(items, list) or not items or len(items) > count:
+        if not isinstance(items, list) or not items:
             raise HTTPException(502, "Image upstream returned no image")
+        if edit and len(items) > count:
+            reference_hashes = {pixel_hash(base64.b64decode(item["b64_json"])) for item in converted}
+            new_images, references, invalid = [], [], []
+            for item in items:
+                try:
+                    data, _ = image_bytes(item["b64_json"])
+                    (references if pixel_hash(data) in reference_hashes else new_images).append(item)
+                except (HTTPException, KeyError, TypeError):
+                    invalid.append(item)
+            items = new_images + references + invalid
         output = []
-        for item in items:
+        for item in items[:count]:
             if not isinstance(item, dict) or not isinstance(item.get("b64_json"), str):
                 raise HTTPException(502, "Image upstream returned no image")
             data, extension = image_bytes(item["b64_json"])

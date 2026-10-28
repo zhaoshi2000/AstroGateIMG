@@ -29,6 +29,8 @@ class GatewayBridgeTests(unittest.TestCase):
         self.records = []
         self.fail_import = False
         self.fail_image = False
+        self.image_count = 1
+        self.response_images = None
 
     def app(self):
         def upstream(request):
@@ -40,7 +42,8 @@ class GatewayBridgeTests(unittest.TestCase):
             if request.url.path.startswith("/v1/images/"):
                 if self.fail_image:
                     return httpx.Response(500, json={"detail": UPSTREAM_KEY})
-                return httpx.Response(200, json={"data": [{"b64_json": self.png}]})
+                images = self.response_images if self.response_images is not None else [self.png] * self.image_count
+                return httpx.Response(200, json={"data": [{"b64_json": image} for image in images]})
             if request.method == "GET":
                 return httpx.Response(200, json={"items": list(self.records)})
             if request.method == "POST":
@@ -107,6 +110,42 @@ class GatewayBridgeTests(unittest.TestCase):
             self.assertEqual(len(self.calls), 1)
             mismatch = client.post("/internal/astrogate/v1/images/generations", headers=self.headers(), json={**payload, "prompt": "different"})
             self.assertEqual(mismatch.status_code, 409)
+
+    def test_extra_upstream_images_return_only_requested_count_and_reuse_same_request(self):
+        self.image_count = 3
+        payload = {"prompt": "edit", "images": [{"b64_json": self.png}], "gateway_request_id": "e" * 64, "n": 1}
+        with TestClient(self.app()) as client:
+            path = "/internal/astrogate/v1/images/edits"
+            first = client.post(path, headers=self.headers(), json=payload)
+            self.assertEqual(first.status_code, 200, first.text)
+            self.assertEqual(len(first.json()["data"]), 1)
+            self.assertEqual(first.json()["data"][0]["b64_json"], self.png)
+            second = client.post(path, headers=self.headers(), json=payload)
+            self.assertEqual(second.json(), first.json())
+            self.assertEqual(len(self.calls), 1)
+
+    def test_extra_outputs_prefer_new_pixels_even_when_reference_encoding_differs(self):
+        alternate = io.BytesIO()
+        Image.new("RGB", (2, 2), "blue").save(alternate, "PNG", compress_level=0)
+        reference_copy = base64.b64encode(alternate.getvalue()).decode()
+        self.assertNotEqual(reference_copy, self.png)
+        output = io.BytesIO()
+        Image.new("RGB", (2, 2), "red").save(output, "PNG")
+        generated = base64.b64encode(output.getvalue()).decode()
+        self.response_images = [reference_copy, generated, self.png]
+        payload = {"prompt": "edit", "images": [{"b64_json": self.png}], "gateway_request_id": "f" * 64, "n": 1}
+        with TestClient(self.app()) as client:
+            path = "/internal/astrogate/v1/images/edits"
+            first = client.post(path, headers=self.headers(), json=payload)
+            self.assertEqual(first.status_code, 200, first.text)
+            self.assertEqual([item["b64_json"] for item in first.json()["data"]], [generated])
+            self.assertEqual(client.post(path, headers=self.headers(), json=payload).json(), first.json())
+            self.assertEqual(len(self.calls), 1)
+            fallback = client.post(path, headers=self.headers(), json={**payload, "gateway_request_id": "1" * 64, "n": 2})
+            self.assertEqual([item["b64_json"] for item in fallback.json()["data"]], [generated, reference_copy])
+            self.response_images = [self.png]
+            single = client.post(path, headers=self.headers(), json={**payload, "gateway_request_id": "2" * 64})
+            self.assertEqual(single.json()["data"][0]["b64_json"], self.png)
 
     def test_image_job_lookup_is_read_only_and_returns_saved_result(self):
         request_id = "b" * 64
