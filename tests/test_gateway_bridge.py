@@ -1,8 +1,11 @@
+import asyncio
 import base64
 import io
 import json
 import sqlite3
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -31,15 +34,20 @@ class GatewayBridgeTests(unittest.TestCase):
         self.fail_image = False
         self.image_count = 1
         self.response_images = None
+        self.image_gate = None
 
     def app(self):
-        def upstream(request):
+        async def upstream(request):
             self.assertEqual(request.headers["authorization"], "Bearer " + UPSTREAM_KEY)
             body = json.loads(request.content) if request.content else None
             self.calls.append((request.method, request.url.path, body))
             if request.url.path == "/v1/models":
                 return httpx.Response(200, json={"data": [{"id": "gpt-image-2"}, {"id": "gpt-text"}]})
             if request.url.path.startswith("/v1/images/"):
+                if self.image_gate:
+                    entered, release = self.image_gate
+                    entered.set()
+                    await asyncio.to_thread(release.wait, 5)
                 if self.fail_image:
                     return httpx.Response(500, json={"detail": UPSTREAM_KEY})
                 images = self.response_images if self.response_images is not None else [self.png] * self.image_count
@@ -164,14 +172,14 @@ class GatewayBridgeTests(unittest.TestCase):
             for secret in (BRIDGE_KEY, UPSTREAM_KEY):
                 self.assertNotIn(secret, recovered.text)
 
-    def test_image_job_lookup_distinguishes_pending_expired_and_unsafe_results(self):
-        pending_id, done_id = "c" * 64, "d" * 64
+    def test_image_job_lookup_distinguishes_unknown_expired_and_unsafe_results(self):
+        unknown_id, done_id = "c" * 64, "d" * 64
         path = "/internal/astrogate/v1/images/jobs/"
         with TestClient(self.app()) as client:
             self.fail_image = True
             self.assertEqual(client.post("/internal/astrogate/v1/images/generations", headers=self.headers(),
-                json={"prompt": "pending", "gateway_request_id": pending_id}).status_code, 502)
-            self.assertEqual(client.get(path + pending_id, headers=self.headers()).json(), {"status": "pending"})
+                json={"prompt": "unknown", "gateway_request_id": unknown_id}).status_code, 502)
+            self.assertEqual(client.get(path + unknown_id, headers=self.headers()).json(), {"status": "unknown"})
             self.fail_image = False
             saved = client.post("/internal/astrogate/v1/images/generations", headers=self.headers(),
                 json={"prompt": "done", "gateway_request_id": done_id}).json()
@@ -184,6 +192,55 @@ class GatewayBridgeTests(unittest.TestCase):
                 db.execute("UPDATE image_jobs SET result=? WHERE id=?", (json.dumps({"data": [{"filename": "../../secret"}]}), done_id))
             self.assertEqual(client.get(path + done_id, headers=self.headers()).json(), {"status": "unavailable"})
             self.assertEqual(len(self.calls), 2)
+
+    def test_image_job_is_pending_only_while_its_upstream_request_is_active(self):
+        request_id = "a" * 64
+        self.image_gate = threading.Event(), threading.Event()
+        with TestClient(self.app()) as client, ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(client.post, "/internal/astrogate/v1/images/generations", headers=self.headers(),
+                                 json={"prompt": "blue logo", "gateway_request_id": request_id})
+            try:
+                self.assertTrue(self.image_gate[0].wait(3))
+                state = client.get("/internal/astrogate/v1/images/jobs/" + request_id, headers=self.headers()).json()
+                self.assertEqual(state, {"status": "pending"})
+            finally:
+                self.image_gate[1].set()
+            self.assertEqual(future.result(timeout=5).status_code, 200)
+            self.assertEqual(client.get("/internal/astrogate/v1/images/jobs/" + request_id,
+                                        headers=self.headers()).json()["status"], "succeeded")
+
+    def test_upstream_and_result_failures_remain_unknown_and_never_resubmit(self):
+        with TestClient(self.app()) as client:
+            for index, fault in enumerate(("upstream", "empty", "invalid"), 1):
+                with self.subTest(fault=fault):
+                    request_id = str(index) * 64
+                    self.fail_image = fault == "upstream"
+                    self.response_images = [] if fault == "empty" else ["not-an-image"] if fault == "invalid" else None
+                    payload = {"prompt": "blue logo", "gateway_request_id": request_id}
+                    before = len(self.calls)
+                    response = client.post("/internal/astrogate/v1/images/generations", headers=self.headers(), json=payload)
+                    self.assertEqual(response.status_code, 502)
+                    self.assertNotIn(UPSTREAM_KEY, response.text)
+                    self.assertEqual(client.get("/internal/astrogate/v1/images/jobs/" + request_id,
+                                                headers=self.headers()).json(), {"status": "unknown"})
+                    self.assertEqual(client.post("/internal/astrogate/v1/images/generations", headers=self.headers(),
+                                                 json=payload).status_code, 409)
+                    self.assertEqual(len(self.calls), before + 1)
+                    with closing(sqlite3.connect(Path(self.directory.name) / "gateway-bridge.sqlite3")) as db:
+                        self.assertEqual(db.execute("SELECT status,result FROM image_jobs WHERE id=?", (request_id,)).fetchone(),
+                                         ("unknown", None))
+
+    def test_result_save_failure_is_unknown_and_never_resubmits(self):
+        request_id = "4" * 64
+        payload = {"prompt": "blue logo", "gateway_request_id": request_id}
+        with TestClient(self.app()) as client:
+            with patch("pathlib.Path.write_bytes", side_effect=OSError("test disk failure")), self.assertRaises(OSError):
+                client.post("/internal/astrogate/v1/images/generations", headers=self.headers(), json=payload)
+            self.assertEqual(client.get("/internal/astrogate/v1/images/jobs/" + request_id,
+                                        headers=self.headers()).json(), {"status": "unknown"})
+            self.assertEqual(client.post("/internal/astrogate/v1/images/generations", headers=self.headers(),
+                                         json=payload).status_code, 409)
+            self.assertEqual(len(self.calls), 1)
 
     def test_gateway_model_discovery_and_image_streams(self):
         with TestClient(self.app()) as client:
