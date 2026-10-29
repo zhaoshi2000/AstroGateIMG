@@ -77,6 +77,11 @@ def create_gateway_router(config) -> APIRouter:
         with job_database() as db:
             db.execute("UPDATE image_jobs SET status='succeeded',result=? WHERE id=?", (json.dumps(metadata), request_id))
 
+    def mark_job_unknown(request_id):
+        if request_id is not None:
+            with job_database() as db:
+                db.execute("UPDATE image_jobs SET status='unknown' WHERE id=? AND status='pending'", (request_id,))
+
     def authenticate(authorization):
         expected = config.gateway_bridge_key
         supplied = (authorization or "").removeprefix("Bearer ")
@@ -210,32 +215,36 @@ def create_gateway_router(config) -> APIRouter:
         previous = reserve_job(request_id, payload)
         if previous:
             return image_response(previous, request_id, body.get("stream") is True, edit)
-        async with client() as http:
-            result = await upstream_json(http, "POST", "/v1/images/" + ("edits" if edit else "generations"), payload)
-        items = result.get("data") if isinstance(result, dict) else None
-        if not isinstance(items, list) or not items:
-            raise HTTPException(502, "Image upstream returned no image")
-        if edit and len(items) > count:
-            reference_hashes = {pixel_hash(base64.b64decode(item["b64_json"])) for item in converted}
-            new_images, references, invalid = [], [], []
-            for item in items:
-                try:
-                    data, _ = image_bytes(item["b64_json"])
-                    (references if pixel_hash(data) in reference_hashes else new_images).append(item)
-                except (HTTPException, KeyError, TypeError):
-                    invalid.append(item)
-            items = new_images + references + invalid
-        output = []
-        for item in items[:count]:
-            if not isinstance(item, dict) or not isinstance(item.get("b64_json"), str):
+        try:
+            async with client() as http:
+                result = await upstream_json(http, "POST", "/v1/images/" + ("edits" if edit else "generations"), payload)
+            items = result.get("data") if isinstance(result, dict) else None
+            if not isinstance(items, list) or not items:
                 raise HTTPException(502, "Image upstream returned no image")
-            data, extension = image_bytes(item["b64_json"])
-            output.append({"b64_json": base64.b64encode(data).decode(), "url": save_asset(data, extension),
-                           "revised_prompt": str(item.get("revised_prompt") or prompt)[:16000], "output_format": "jpeg" if extension == "jpg" else extension})
-        # Gateway usage accounting owns these requests; no IMG customer credits
-        # or cookies are consumed and no operator token reaches the response.
-        result = {"created": int(time.time()), "data": output}
-        complete_job(request_id, result)
+            if edit and len(items) > count:
+                reference_hashes = {pixel_hash(base64.b64decode(item["b64_json"])) for item in converted}
+                new_images, references, invalid = [], [], []
+                for item in items:
+                    try:
+                        data, _ = image_bytes(item["b64_json"])
+                        (references if pixel_hash(data) in reference_hashes else new_images).append(item)
+                    except (HTTPException, KeyError, TypeError):
+                        invalid.append(item)
+                items = new_images + references + invalid
+            output = []
+            for item in items[:count]:
+                if not isinstance(item, dict) or not isinstance(item.get("b64_json"), str):
+                    raise HTTPException(502, "Image upstream returned no image")
+                data, extension = image_bytes(item["b64_json"])
+                output.append({"b64_json": base64.b64encode(data).decode(), "url": save_asset(data, extension),
+                               "revised_prompt": str(item.get("revised_prompt") or prompt)[:16000], "output_format": "jpeg" if extension == "jpg" else extension})
+            # Gateway usage accounting owns these requests; no IMG customer credits
+            # or cookies are consumed and no operator token reaches the response.
+            result = {"created": int(time.time()), "data": output}
+            complete_job(request_id, result)
+        except (Exception, asyncio.CancelledError):
+            mark_job_unknown(request_id)
+            raise
         return image_response(result, request_id, body.get("stream") is True, edit)
 
     @router.get("/internal/astrogate/v1/models")
