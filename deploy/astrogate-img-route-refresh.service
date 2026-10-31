@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh AstroGate image proxy routes and account bindings
+After=network-online.target astrogate-img-proxy.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/astrogate-img/deploy/refresh_image_account_routes.py
+TimeoutStartSec=240
+

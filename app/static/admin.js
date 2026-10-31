@@ -1,7 +1,7 @@
 (() => {
   'use strict';
   const $ = (selector) => document.querySelector(selector);
-  const pages = { overview: ['运营概览', '上游额度、用户与图片服务运行情况。'], accounts: ['上游账号池', '查看账号剩余图片次数、重置时间与运行状态。'], users: ['用户与积分', '查询客户账号，管理可用积分。'], jobs: ['出图审核', '查看完整提示词、生成图片和失败原因。'], codes: ['兑换码管理', '生成充值兑换码，查看使用情况。'] };
+  const pages = { overview: ['运营概览', '上游额度、用户与图片服务运行情况。'], accounts: ['上游账号池', '查看账号剩余图片次数、重置时间与运行状态。'], users: ['用户与积分', '查询客户账号，管理可用积分。'], jobs: ['出图审核', '查看完整提示词、生成图片和失败原因。'], api: ['API 与并发', '管理调用密钥，批量生成图片，逐项查看结果。'], codes: ['兑换码管理', '生成充值兑换码，查看使用情况。'] };
   const route = location.pathname.split('/')[2]; const page = pages[route] ? route : 'overview';
   const state = { accounts: [], selected: new Set(), refreshing: false, user: null, jobsPage: 1 };
   function el(tag, className, text) { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = String(text); return node; }
@@ -24,9 +24,10 @@
     info.append(el('small', 'muted', `本次计价 ${job.credits_cost} 积分`));
     const art = el('div', 'review-card-art'); art.append(imageCell(job)); card.append(info, art); return card;
   }
+  let apiPanel = null;
   let toastTimer;
   function toast(message, error = false) { $('#admin-toast').textContent = message; $('#admin-toast').classList.toggle('error', error); $('#admin-toast').classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#admin-toast').classList.remove('show'), error ? 6500 : 3500); }
-  function showLogin(message = '') { state.user = null; $('#admin-loading').classList.add('hidden'); $('#admin-shell').classList.add('hidden'); $('#admin-login-view').classList.remove('hidden'); $('#admin-login-error').textContent = message; }
+  function showLogin(message = '') { apiPanel?.stop(); state.user = null; $('#admin-loading').classList.add('hidden'); $('#admin-shell').classList.add('hidden'); $('#admin-login-view').classList.remove('hidden'); $('#admin-login-error').textContent = message; }
   async function api(path, options = {}) {
     const response = await fetch(path, { credentials: 'same-origin', ...options, headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...options.headers } });
     let body; try { body = await response.json(); } catch { throw new Error('服务暂时无法响应，请稍后重试'); }
@@ -135,7 +136,7 @@
     $('#admin-codes').replaceChildren(...result.items.map((code) => { const row = el('tr'); const status = code.redeemed_username ? '已兑换' : new Date(code.expires_at) <= new Date() ? '已过期' : '未使用'; row.append(td(code.id), td('…' + code.suffix), td(code.credits), td(status), td(code.redeemed_username || '—'), td(date(code.expires_at))); return row; }));
     $('#codes-empty').classList.toggle('hidden', result.items.length > 0);
   }
-  async function loadPage() { if (page === 'overview') { const results = await Promise.allSettled([loadOverview(), loadAccounts()]); results.forEach((result) => { if (result.status === 'rejected') toast(result.reason.message, true); }); } else if (page === 'accounts') await loadAccounts(); else if (page === 'users') await loadUsers(); else if (page === 'jobs') await loadJobs(); else await loadCodes(); }
+  async function loadPage() { if (page === 'overview') { const results = await Promise.allSettled([loadOverview(), loadAccounts()]); results.forEach((result) => { if (result.status === 'rejected') toast(result.reason.message, true); }); } else if (page === 'accounts') await loadAccounts(); else if (page === 'users') await loadUsers(); else if (page === 'jobs') await loadJobs(); else if (page === 'api') { if (!apiPanel) apiPanel = AdminApiPanel.mount({ api, toast, el, date }); await apiPanel.load(); } else await loadCodes(); }
   async function enter(user) {
     state.user = user; $('#admin-loading').classList.add('hidden'); $('#admin-login-view').classList.add('hidden'); $('#admin-shell').classList.remove('hidden'); $('#admin-name').textContent = user.username;
     $('#admin-page-title').textContent = pages[page][0]; $('#admin-page-description').textContent = pages[page][1]; $('#admin-breadcrumb').textContent = pages[page][0];

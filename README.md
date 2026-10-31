@@ -2,6 +2,8 @@
 
 可自托管的 AI 图片创作平台，包含作品社区首页、邮箱注册登录、文生图、多图参考、个人作品库、积分中心和管理控制台。
 
+源码采用 MIT 许可证；生产环境的密钥、用户数据和图片不包含在仓库中。
+
 线上地址：<https://img.astrogate.sbs>
 
 ## 功能
@@ -131,6 +133,71 @@ command="/usr/local/sbin/astrogate-img-backup-stream",restrict ssh-ed25519 <备�
 ## 上游要求
 
 使用 OpenAI 兼容图片接口：文生图为 `/v1/images/generations`，图生图为 `/v1/images/edits`。图生图使用 JSON `images` 数组（包含 `b64_json`、`filename`、`mime_type`），适配本项目正在使用的 `chatgpt2api`。上游密钥只保留在服务端。
+
+## 管理员图片 API 与并发调用
+
+管理员登录后台，在“API 与并发”中创建专用密钥。完整密钥只在创建时展示一次，
+丢失后可撤销并重新创建；不要提交到 Git 或分享给其他人。密钥只拥有图片模型查询、
+生成和读取本人图片的权限，不能管理用户、积分或其他密钥。
+
+接口地址为站点的 `/v1`，请求头使用 `Authorization: Bearer <密钥>`：
+
+- `GET /v1/models`：查询模型及当前可用状态和积分价格。
+- `POST /v1/images/generations`：JSON 文生图，参数包括 `prompt`、`model`、
+  `size`、`quality`、`resolution`；一次请求生成一张图（`n: 1`）。
+- `POST /v1/images/edits`：JSON 图生图，额外提供 `image_data_urls` 数组，
+  内容为图片 data URL，最多 8 张、总计不超过 50 MB。
+- 输出默认在 `data[0].b64_json` 中；传 `response_format: "url"` 可获取受保护的
+  图片地址，下载时仍需提供同一管理员的有效 API 密钥。
+
+图片使用管理员账号积分，成功生成按模型扣费，失败自动退回。密钥的并发上限可在
+创建时设置为 1–8；同一管理员的 API 密钥与后台并发面板合计最多同时进行 8 个请求。
+超限返回 HTTP 429，并附带 `Retry-After`；该请求不会扣费。面板默认同时处理 3 张，
+每行一条提示词，可停止尚未提交的任务，已提交的任务会继续完成。
+
+为防止网络中断后重试造成重复扣费，请为每个不同的生成任务提供唯一的
+`Idempotency-Key` 请求头，并在重试同一任务时沿用。任务仍在生成中、此前失败或
+同一编号对应不同内容时会返回 409；请先在后台“出图审核”检查记录。
+
+示例使用 Python 标准库，先把密钥放入环境变量 `ASTROGATE_IMG_API_KEY`：
+
+```python
+import concurrent.futures
+import json
+import os
+import urllib.request
+import uuid
+
+endpoint = "https://img.astrogate.sbs/v1/images/generations"
+key = os.environ["ASTROGATE_IMG_API_KEY"]
+prompts = ["雨夜中的霓虹城市", "阳光下的海边小镇", "山间云海"]
+
+def generate(entry):
+    number, prompt = entry
+    payload = json.dumps({"prompt": prompt, "model": "gpt-image-2",
+                          "size": "1536x864", "resolution": "1K", "n": 1}).encode()
+    request = urllib.request.Request(endpoint, data=payload, method="POST", headers={
+        "Authorization": "Bearer " + key,
+        "Content-Type": "application/json",
+        "Idempotency-Key": uuid.uuid4().hex,
+    })
+    with urllib.request.urlopen(request, timeout=300) as response:
+        result = json.load(response)
+    import base64
+    image_bytes = base64.b64decode(result["data"][0]["b64_json"])
+    extension = ("png" if image_bytes.startswith(b"\x89PNG") else
+                 "jpg" if image_bytes.startswith(b"\xff\xd8\xff") else "webp")
+    with open(f"image-{number}.{extension}", "wb") as image:
+        image.write(image_bytes)
+    return result["id"]
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+    for job_id in pool.map(generate, enumerate(prompts, 1)):
+        print(job_id)
+```
+
+`gpt-image-2` 是当前标准档的实际接口模型 ID，界面显示名称为“GPT Image 2.5 · 标准”；
+模型列表中的其他档位只有在上游显示可用时才能调用。
 
 ## AstroGate 网关接入
 

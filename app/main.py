@@ -25,6 +25,7 @@ from urllib.parse import parse_qsl, urlparse
 
 import httpx
 from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import AliasChoices, BaseModel, EmailStr, Field, field_validator
@@ -34,6 +35,7 @@ from app.mail import send_registration_code
 from app.community_media import MAX_POST_BYTES, MAX_POST_IMAGES, MAX_UPLOAD_BYTES, store_post_images
 from app.upstream_admin import project_accounts
 from app.gateway_bridge import create_gateway_router
+from app.admin_api import GenerationAdmission, create_admin_api_router, initialize_admin_api_database
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 STATIC_DIR = ROOT_DIR / "app" / "static"
@@ -541,11 +543,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     verification_secret = config.email_code_secret
     model_cache: dict[str, Any] = {"expires": 0.0, "ids": set()}
     model_cache_lock = Lock()
+    admin_generation_admission = GenerationAdmission()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         nonlocal verification_secret
         initialize_database(database_path, config)
+        initialize_admin_api_database(database_path, database_connection)
         image_dir.mkdir(parents=True, exist_ok=True)
         if not verification_secret:
             secret_file = config.data_dir / ".email-code-secret"
@@ -576,7 +580,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        if request.url.path.startswith(("/api/", "/internal/")):
+        if request.url.path.startswith(("/api/", "/internal/", "/v1/")):
             response.headers["Cache-Control"] = "no-store"
         return response
 
@@ -827,6 +831,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/admin/users")
     @app.get("/admin/jobs")
     @app.get("/admin/codes")
+    @app.get("/admin/api")
     def admin_page():
         return FileResponse(STATIC_DIR / "admin.html", headers={"Cache-Control": "no-store"})
 
@@ -1347,7 +1352,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         credits_cost = selected_model["credits_cost"]
         if len(references) > MAX_REFERENCES:
             raise HTTPException(400, "最多可使用 8 张参考图")
-        decoded = [decode_reference(value) for value in references]
+        decoded = await run_in_threadpool(lambda: [decode_reference(value) for value in references]) if references else []
         if sum(size for _, size in decoded) > MAX_IMAGE_BYTES:
             raise HTTPException(413, "参考图总大小不能超过 50MB")
         mode = "image-to-image" if references else "text-to-image"
@@ -1392,7 +1397,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if len(output) > MAX_OUTPUT_BYTES:
                 raise HTTPException(502, "生成图片超过大小限制")
             try:
-                output, extension, output_size, source_size = prepare_generated_image(output, target)
+                output, extension, output_size, source_size = await run_in_threadpool(prepare_generated_image, output, target)
             except HTTPException as exc:
                 raise HTTPException(502, exc.detail) from exc
             output_path = image_dir / f"{job_id}.{extension}"
@@ -1420,6 +1425,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/images/generations")
     async def generate_image(body: ImageGenerationRequest, user=Depends(current_user), idempotency_key: Annotated[str | None, Header()] = None):
+        if user['is_admin']:
+            with admin_generation_admission.slot(user['id']):
+                return await run_generation(body, [], user, idempotency_key)
         return await run_generation(body, [], user, idempotency_key)
 
     @app.post("/api/images/edits")
@@ -1429,7 +1437,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             references.append(body.image_data_url)
         if not references:
             raise HTTPException(400, "请先添加参考图")
+        if user['is_admin']:
+            with admin_generation_admission.slot(user['id']):
+                return await run_generation(body, references, user, idempotency_key)
         return await run_generation(body, references, user, idempotency_key)
+
+    app.include_router(create_admin_api_router(
+        database_path=database_path, image_dir=image_dir, database_connection=database_connection,
+        hash_token=hash_token, now_iso=now_iso, public_user=public_user, admin_user=admin_user,
+        image_model_items=image_model_items, run_generation=run_generation,
+        generation_request_type=ImageGenerationRequest, edit_request_type=ImageEditRequest,
+        admission=admin_generation_admission,
+    ))
 
     return app
 

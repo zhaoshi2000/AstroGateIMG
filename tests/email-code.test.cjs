@@ -11,6 +11,8 @@ class Element {
   }
   addEventListener(name, callback) { this.events[name] = callback; }
   setAttribute() {}
+  append() {}
+  replaceChildren() {}
   reportValidity() { return true; }
   focus() {}
 }
@@ -24,7 +26,7 @@ async function page({ email = 'artist@example.com', storage = new Map(), clock =
   select('#username').value = email;
   let calls = 0; let intervalId = 0;
   const context = vm.createContext({
-    document: { querySelector: select, querySelectorAll: () => [], addEventListener() {} },
+    document: { querySelector: select, querySelectorAll: () => [], createElement: () => new Element(), addEventListener() {} },
     window: { addEventListener: (name, callback) => { events[name] = callback; } },
     location: { pathname: '/register' }, navigator: {}, URL, URLSearchParams, Intl,
     Date: class extends Date { static now() { return clock.now; } },

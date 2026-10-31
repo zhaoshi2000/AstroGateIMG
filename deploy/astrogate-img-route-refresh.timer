@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh AstroGate image proxy routes every 30 minutes
+
+[Timer]
+OnActiveSec=30min
+OnUnitActiveSec=30min
+Persistent=true
+Unit=astrogate-img-route-refresh.service
+
+[Install]
+WantedBy=timers.target
