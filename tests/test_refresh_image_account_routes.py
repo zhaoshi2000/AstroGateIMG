@@ -11,7 +11,7 @@ spec.loader.exec_module(routes)
 
 
 class ImageAccountRoutesTests(unittest.TestCase):
-    def test_ready_accounts_use_at_most_five_per_exit(self):
+    def test_ready_accounts_use_at_most_five_per_listener(self):
         accounts = [{"email": f"person-{number:02d}", "access_token": f"token-{number}",
                      "quota": 1, "status": "正常"} for number in range(78)]
         accounts.append({"email": "disabled", "access_token": "disabled", "quota": 10, "status": "禁用"})
@@ -39,6 +39,32 @@ class ImageAccountRoutesTests(unittest.TestCase):
             self.assertEqual(group["proxies"][0], f"node-{index}")
             self.assertEqual(group["type"], "fallback")
             self.assertGreater(len(group["proxies"]), 1)
+
+    def test_accounts_stay_at_five_per_listener_when_exits_are_fewer(self):
+        accounts = [{"email": f"person-{number:02d}", "access_token": f"token-{number}",
+                     "quota": 1, "status": "正常"} for number in range(15)]
+        assignments = routes.route_assignments(routes.ready_accounts(accounts), 3)
+        verified = [(100, "node-a"), (120, "node-b")]
+        nodes = [{"name": name, "server": "example.com"} for _, name in verified]
+        config = routes.production_config({}, nodes, {}, verified, 3)
+        self.assertEqual(len(config["listeners"]), 3)
+        self.assertEqual(max(Counter(proxy for _, proxy in assignments).values()), 5)
+        self.assertEqual([group["proxies"][0] for group in config["proxy-groups"][1:]],
+                         ["node-a", "node-b", "node-a"])
+
+    def test_local_backup_is_in_each_group_when_available(self):
+        verified = [(100 + index, f"node-{index}") for index in range(5)] + [(900, routes.LOCAL_BACKUP)]
+        nodes = [{"name": name, "server": "example.com"} for _, name in verified]
+        config = routes.production_config({}, nodes, {}, verified, 5)
+        for group in config["proxy-groups"][1:]:
+            self.assertIn(routes.LOCAL_BACKUP, group["proxies"])
+
+    def test_fallback_prefers_a_different_physical_server(self):
+        verified = [(100, "a-1"), (110, "a-2"), (120, "b-1")]
+        nodes = [{"name": name, "server": "server-a" if name.startswith("a") else "server-b"}
+                 for _, name in verified]
+        config = routes.production_config({}, nodes, {}, verified, 3)
+        self.assertEqual(config["proxy-groups"][1]["proxies"][:2], ["a-1", "b-1"])
 
 
 if __name__ == "__main__":
