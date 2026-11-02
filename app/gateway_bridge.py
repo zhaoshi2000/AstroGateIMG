@@ -301,7 +301,7 @@ def create_gateway_router(config) -> APIRouter:
             return {"status": "unavailable"}
         return {"status": "succeeded", "result": result}
 
-    @router.get("/gateway-assets/{filename}")
+    @router.api_route("/gateway-assets/{filename}", methods=["GET", "HEAD"])
     async def download_asset(filename: str):
         if not re.fullmatch(r"[0-9a-f]{48}\.(?:png|jpg|webp)", filename):
             raise HTTPException(404, "Image not found")
