@@ -580,7 +580,28 @@ function renderHistory() {
   }));
   $('#history-count').textContent = `${state.history.length} 件作品`; $('#history-empty').classList.toggle('is-hidden', !!state.history.length);
 }
-async function loadHistory() { const data = await api('/api/images/history'); state.history = data.items; renderHistory(); }
+let historyRefreshInFlight = null;
+function loadHistory() {
+  if (historyRefreshInFlight) return historyRefreshInFlight;
+  historyRefreshInFlight = (async () => {
+    const data = await api('/api/images/history');
+    state.history = data.items;
+    renderHistory();
+  })();
+  return historyRefreshInFlight.finally(() => { historyRefreshInFlight = null; });
+}
+async function refreshExternalHistory() {
+  if (document.visibilityState === 'hidden' || state.busy || !state.user) return;
+  try { await Promise.all([loadHistory(), refreshUser()]); }
+  catch (error) { if (error.status === 401) location.assign('/login'); }
+}
+$('#refresh-history').addEventListener('click', async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try { await Promise.all([loadHistory(), refreshUser()]); toast('作品记录已更新'); }
+  catch (error) { toast(error.message, true); }
+  finally { button.disabled = false; }
+});
 $('#generation-form').addEventListener('submit', async (event) => {
   event.preventDefault(); if (state.busy) return;
   if (!$('#prompt').value.trim()) return toast('请填写画面描述', true);
@@ -668,6 +689,9 @@ $('#logout-button').addEventListener('click', async () => { if (state.busy) retu
     if (route === 'studio') {
       await loadImageModels();
       await loadHistory();
+      window.setInterval(refreshExternalHistory, 30000);
+      window.addEventListener('focus', refreshExternalHistory);
+      document.addEventListener('visibilitychange', refreshExternalHistory);
       try {
         const draft = JSON.parse(sessionStorage.getItem('astrogate.community-draft') || 'null');
         if (draft && typeof draft.prompt === 'string' && draft.prompt.length <= 4000) {
