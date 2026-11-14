@@ -109,6 +109,10 @@ class AdminApiTests(unittest.IsolatedAsyncioTestCase):
         audit = (await self.client.get('/api/admin/jobs')).json()['items'][0]
         self.assertEqual(audit['prompt'], 'blue moon')
         self.assertEqual(audit['status'], 'succeeded')
+        history = (await self.client.get('/api/images/history')).json()['items']
+        self.assertEqual(history[0]['id'], body['id'])
+        self.assertEqual(history[0]['prompt'], 'blue moon')
+        self.assertEqual(history[0]['image_src'], '/api/images/files/' + body['id'])
         self.assertEqual((await self.client.post('/v1/images/generations', headers=headers, json={'prompt': 'different'})).status_code, 409)
         self.assertEqual((await self.client.post('/v1/images/generations', headers=headers, json={'prompt': 'moon', 'n': 2})).status_code, 422)
 

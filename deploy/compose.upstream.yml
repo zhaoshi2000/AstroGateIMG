@@ -1,0 +1,26 @@
+﻿services:
+  client:
+    depends_on:
+      upstream:
+        condition: service_healthy
+  upstream:
+    build: ./upstream
+    restart: unless-stopped
+    network_mode: host
+    env_file: .upstream.env
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    volumes:
+      - ./upstream-data:/app/data
+    healthcheck:
+      test: ["CMD", ".venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:21873/version',timeout=5)"]
+      interval: 20s
+      timeout: 10s
+      retries: 6
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'

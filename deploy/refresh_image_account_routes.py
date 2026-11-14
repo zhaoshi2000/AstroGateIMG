@@ -1,4 +1,4 @@
-"""Refresh private image exits and bind at most five ready accounts to each exit."""
+"""Refresh private image exits and bind at most five ready accounts to each listener."""
 
 import argparse
 import concurrent.futures
@@ -24,6 +24,7 @@ BACKEND = "https://chatgpt.com/backend-api/me"
 FIRST_PORT = 17911
 PROBE_PORT = 18991
 PROBE_CONTROLLER = "127.0.0.1:19094"
+LOCAL_BACKUP = "LOCAL-RELAY"
 EXCLUDED = ("香港", "港", "hong kong", "[hk]", "hk-", "-hk", "剩余流量", "套餐到期", "防失联")
 
 
@@ -78,6 +79,11 @@ def subscription_nodes(root, current):
     for node in current.get("proxies") or []:
         if eligible_node(node):
             nodes[node["name"]] = node
+    backup = root / "proxy-runtime" / "local-backup.yaml"
+    if backup.exists():
+        for node in yaml.safe_load(backup.read_bytes()).get("proxies") or []:
+            if eligible_node(node):
+                nodes[node["name"]] = node
     for path in sorted((root / "proxy-runtime" / "subscriptions").glob("*.txt")):
         address = path.read_text().strip()
         if not address:
@@ -179,7 +185,7 @@ def rank_nodes(root, mihomo, nodes, hosts):
 def production_config(current, nodes, hosts, verified, group_count):
     names = [name for _, name in verified]
     by_name = {node["name"]: node for node in nodes}
-    selected = names[:group_count]
+    selected = [names[index % len(names)] for index in range(group_count)]
     reserve = names[group_count:]
     config = dict(current)
     config["hosts"] = hosts
@@ -188,8 +194,9 @@ def production_config(current, nodes, hosts, verified, group_count):
                                "url": TRACE, "interval": 90, "lazy": False}]
     config["listeners"] = []
     for index, name in enumerate(selected):
+        other_servers = [candidate for candidate in names if by_name[candidate]["server"] != by_name[name]["server"]]
         alternate = [selected[(index + offset) % len(selected)] for offset in range(1, min(4, len(selected)))]
-        choices = list(dict.fromkeys([name, *alternate, *reserve[:2]]))
+        choices = list(dict.fromkeys([name, *other_servers[:2], *alternate, *([LOCAL_BACKUP] if LOCAL_BACKUP in names else []), *reserve[:2]]))
         group = f"IMG-{index + 1:02d}"
         config["proxy-groups"].append({"name": group, "type": "fallback", "proxies": choices,
                                        "url": TRACE, "interval": 90, "lazy": False})
@@ -218,6 +225,8 @@ def deploy(root, mihomo):
     nodes = subscription_nodes(root, current)
     hosts = resolved_hosts(nodes, current.get("hosts") or {})
     verified = rank_nodes(root, mihomo, nodes, hosts)
+    verified_names = {name for _, name in verified}
+    physical_exits = len({node["server"] for node in nodes if node["name"] in verified_names})
     old_groups = len([item for item in current.get("listeners") or [] if str(item.get("name") or "").startswith("img-")])
     if old_groups:
         previous = [group["proxies"][0] for group in current.get("proxy-groups") or []
@@ -227,16 +236,16 @@ def deploy(root, mihomo):
         stable = list(dict.fromkeys(name for name in previous if name in latency_by_name and latency_by_name[name] <= 2500))
         verified = [(latency_by_name[name], name) for name in stable] + [entry for entry in verified if entry[1] not in stable]
     group_count = max(old_groups, math.ceil(len(ready) / 5))
-    if len(verified) < group_count:
-        return {"status": "insufficient", "ready_accounts": len(ready), "verified_exits": len(verified),
+    if not verified:
+        return {"status": "insufficient", "ready_accounts": len(ready), "verified_exits": len(verified), "physical_exits": physical_exits,
                 "needed_exits": group_count}
     assigned = route_assignments(ready, group_count)
     proposed = production_config(current, nodes, hosts, verified, group_count)
     if proposed == current and all(account.get("proxy") == proxy for account, proxy in assigned):
-        return {"status": "unchanged", "ready_accounts": len(ready), "verified_exits": len(verified),
+        return {"status": "unchanged", "ready_accounts": len(ready), "verified_exits": len(verified), "physical_exits": physical_exits,
                 "routed_exits": group_count}
     backup = root / "backups" / ("image-routes-" + datetime.now(timezone.utc).strftime("%Y%m%d"))
-    backup.mkdir(parents=True, mode=0o700)
+    backup.mkdir(parents=True, exist_ok=True, mode=0o700)
     if not (backup / "config.yaml").exists():
         private_write(backup / "config.yaml", original)
         private_write(backup / "account-proxies.json", json.dumps(
@@ -272,7 +281,7 @@ def deploy(root, mihomo):
         controller_request(controller, secret, "/configs", {"path": str(path)})
         candidate.unlink(missing_ok=True)
         raise
-    return {"status": "updated", "ready_accounts": len(ready), "verified_exits": len(verified),
+    return {"status": "updated", "ready_accounts": len(ready), "verified_exits": len(verified), "physical_exits": physical_exits,
             "routed_exits": group_count, "accounts_updated": len(changed), "backup": str(backup)}
 
 

@@ -88,7 +88,13 @@ class GatewayBridgeTests(unittest.TestCase):
             self.assertEqual(item["b64_json"], self.png)
             path = item["url"].removeprefix("https://img.example.test")
             self.assertEqual(client.get(path).content, base64.b64decode(self.png))
+            head = client.head(path)
+            self.assertEqual(head.status_code, 200)
+            self.assertEqual(head.headers["content-type"], "image/png")
+            self.assertEqual(int(head.headers["content-length"]), len(base64.b64decode(self.png)))
+            self.assertEqual(head.content, b"")
             self.assertEqual(client.get("/gateway-assets/predictable.png").status_code, 404)
+            self.assertEqual(client.head("/gateway-assets/predictable.png").status_code, 404)
             for secret in (BRIDGE_KEY, UPSTREAM_KEY):
                 self.assertNotIn(secret, response.text)
             with database_connection(Path(self.directory.name) / "astrogate.db") as db:
