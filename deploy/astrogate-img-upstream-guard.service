@@ -1,0 +1,12 @@
+[Unit]
+Description=Recover AstroGate IMG upstream after sustained local TCP failure
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/astrogate-img/deploy/upstream_guard.py
+StateDirectory=astrogate-img-upstream-guard
+StateDirectoryMode=0700
+TimeoutStartSec=60
+NoNewPrivileges=true

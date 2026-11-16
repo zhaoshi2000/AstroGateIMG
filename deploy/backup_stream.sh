@@ -4,8 +4,22 @@ set -euo pipefail
 # Streams a consistent private backup to stdout. Intended for a restricted
 # SSH key; keep stdout exclusively for the tar stream.
 root=/opt/astrogate-img
-staging=$(mktemp -d /tmp/astrogate-img-backup.XXXXXXXX)
-trap 'rm -rf "$staging"' EXIT
+required_bytes=$(du -sb "$root/app" "$root/upstream" "$root/data" "$root/upstream-data" "$root/proxy-runtime" | awk '{total += $1} END {print total}')
+available_bytes=$(df -B1 --output=avail /dev/shm | tail -n 1)
+if (( available_bytes < required_bytes * 2 )); then
+    echo 'Insufficient tmpfs space for a consistent image backup' >&2
+    exit 1
+fi
+
+# The public host has little free disk space. Keep the consistent snapshot in
+# tmpfs, and stream the compressed archive directly to the backup machine.
+staging=$(mktemp -d /dev/shm/astrogate-img-backup.XXXXXXXX)
+cleanup() {
+    case "$staging" in
+        /dev/shm/astrogate-img-backup.*) rm -rf -- "$staging" ;;
+    esac
+}
+trap cleanup EXIT
 chmod 700 "$staging"
 
 for name in app upstream data upstream-data proxy-runtime systemd; do
@@ -13,7 +27,7 @@ for name in app upstream data upstream-data proxy-runtime systemd; do
 done
 mkdir -p "$staging/host-config/nginx" "$staging/host-config/postfix" \
     "$staging/host-config/docker" "$staging/host-config/mail-relay" \
-    "$staging/host-config/ip-access"
+    "$staging/host-config/ip-access" "$staging/host-config/journald"
 
 rsync -a "$root/app/" "$staging/app/"
 rsync -a "$root/upstream/" "$staging/upstream/"
@@ -25,12 +39,11 @@ if [ -d "$root/proxy-runtime" ]; then
     rsync -a --exclude='cache.db' --exclude='config.full-before-us-only.yaml' \
         "$root/proxy-runtime/" "$staging/proxy-runtime/"
 fi
-if [ -f /etc/systemd/system/astrogate-img-proxy.service ]; then
-    cp -p /etc/systemd/system/astrogate-img-proxy.service "$staging/systemd/"
-fi
-if [ -f /etc/systemd/system/astrogate-img-mail-relay.service ]; then
-    cp -p /etc/systemd/system/astrogate-img-mail-relay.service "$staging/systemd/"
-fi
+for unit in /etc/systemd/system/astrogate-img-*.service \
+            /etc/systemd/system/astrogate-img-*.timer; do
+    [ -f "$unit" ] || continue
+    cp -p "$unit" "$staging/systemd/"
+done
 if [ -f /etc/nginx/sites-available/img.astrogate.sbs ]; then
     cp -p /etc/nginx/sites-available/img.astrogate.sbs "$staging/host-config/nginx/"
 fi
@@ -39,6 +52,10 @@ if [ -f /etc/nginx/sites-available/astrogate-img-ip ]; then
 fi
 if [ -f /etc/postfix/main.cf ]; then
     cp -p /etc/postfix/main.cf "$staging/host-config/postfix/"
+fi
+if [ -f /etc/systemd/journald.conf.d/astrogate-img.conf ]; then
+    cp -p /etc/systemd/journald.conf.d/astrogate-img.conf \
+        "$staging/host-config/journald/"
 fi
 if [ -f /etc/systemd/system/docker.service.d/astrogate-proxy.conf ]; then
     cp -p /etc/systemd/system/docker.service.d/astrogate-proxy.conf \

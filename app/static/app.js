@@ -568,6 +568,7 @@ function renderHistory() {
       if (!confirm('删除这张作品？删除后无法恢复，已消耗积分不会退回。')) return;
       try {
         await api(`/api/images/history/${encodeURIComponent(item.id)}`, { method: 'DELETE' });
+        historyMutationVersion += 1;
         state.history = state.history.filter((value) => value.id !== item.id);
         if (state.activeImageItem?.id === item.id) {
           state.activeImageItem = null;
@@ -581,14 +582,20 @@ function renderHistory() {
   $('#history-count').textContent = `${state.history.length} 件作品`; $('#history-empty').classList.toggle('is-hidden', !!state.history.length);
 }
 let historyRefreshInFlight = null;
+let historyMutationVersion = 0;
 function loadHistory() {
   if (historyRefreshInFlight) return historyRefreshInFlight;
-  historyRefreshInFlight = (async () => {
+  const version = historyMutationVersion;
+  const request = (async () => {
     const data = await api('/api/images/history');
-    state.history = data.items;
-    renderHistory();
+    // A request started before a local save/delete must not replace the newer gallery.
+    if (version === historyMutationVersion) {
+      state.history = data.items;
+      renderHistory();
+    }
   })();
-  return historyRefreshInFlight.finally(() => { historyRefreshInFlight = null; });
+  historyRefreshInFlight = request.finally(() => { historyRefreshInFlight = null; });
+  return historyRefreshInFlight;
 }
 async function refreshExternalHistory() {
   if (document.visibilityState === 'hidden' || state.busy || !state.user) return;
@@ -619,7 +626,10 @@ $('#generation-form').addEventListener('submit', async (event) => {
     const body = { prompt, model: model.id, size: $('#size').value, quality: $('#quality').value, resolution: $('#resolution-tier').value || 'original' };
     if (references.length) body.image_data_urls = references;
     const data = await api(`/api/images/${references.length ? 'edits' : 'generations'}`, { method: 'POST', headers: { 'Idempotency-Key': crypto.randomUUID() }, body: JSON.stringify(body) });
-    setBalance(data.credits); showResult(data.item); state.history.unshift(data.item); renderHistory();
+    setBalance(data.credits); showResult(data.item);
+    historyMutationVersion += 1;
+    state.history = [data.item, ...state.history.filter((item) => item.id !== data.item.id)];
+    renderHistory();
     const spent = data.item.credits_cost ?? model.credits_cost;
     $('#generation-status').textContent = `作品已完成，本次消耗 ${spent} 积分。`; toast(`新作品已保存，消耗 ${spent} 积分`);
   } catch (error) { $('#generation-status').textContent = '生成未完成，请查看积分余额和明细后重试。'; toast(error.message, true); }
