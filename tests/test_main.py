@@ -212,7 +212,7 @@ class AstroGateTests(unittest.TestCase):
 
     def test_homepage_and_studio_exist(self):
         with TestClient(self.app()) as client:
-            self.assertIn('0.05', client.get('/').text)
+            self.assertIn('0.10', client.get('/').text)
             self.assertIn('reference-image', client.get('/studio').text)
             self.assertEqual(client.get('/assets/mark.svg').status_code, 200)
 

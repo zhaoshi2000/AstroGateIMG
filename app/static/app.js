@@ -1,8 +1,8 @@
 const $ = (selector) => document.querySelector(selector);
 const state = { user: null, mode: 'login', references: [], history: [], activeImageItem: null, busy: false, reading: false,
-  models: [{ id: 'gpt-image-2', label: 'GPT Image 2.5 · 标准', available: true, credits_cost: 1, price_rmb: '0.05' },
-    { id: 'gpt-image-2.5-flare', label: 'GPT Image 2.5 Flare', available: false, credits_cost: 5, price_rmb: '0.25' },
-    { id: 'gpt-image-2.5-sunburst', label: 'GPT Image 2.5 Sunburst', available: false, credits_cost: 5, price_rmb: '0.25' }] };
+  models: [{ id: 'gpt-image-2', label: 'GPT Image 2.5 · 标准', available: true, credits_cost: 1, price_rmb: '0.10' },
+    { id: 'gpt-image-2.5-flare', label: 'GPT Image 2.5 Flare', available: false, credits_cost: 5, price_rmb: '0.50' },
+    { id: 'gpt-image-2.5-sunburst', label: 'GPT Image 2.5 Sunburst', available: false, credits_cost: 5, price_rmb: '0.50' }] };
 if (['/studio', '/wallet'].includes(location.pathname)) {
   document.body?.classList.add('studio-theme');
   document.querySelector('meta[name="theme-color"]')?.setAttribute('content', '#0b1020');

@@ -153,6 +153,25 @@
   $('#select-all-accounts').addEventListener('change', () => { filteredAccounts().forEach((account) => $('#select-all-accounts').checked ? state.selected.add(account.id) : state.selected.delete(account.id)); renderAccounts(); });
   $('#refresh-selected').addEventListener('click', () => { if (state.selected.size) refreshQuota([...state.selected]); }); $('#refresh-upstream').addEventListener('click', () => refreshQuota([]));
   $('#admin-user-search-form').addEventListener('submit', (event) => { event.preventDefault(); loadUsers().catch((error) => toast(error.message, true)); });
+  $('#admin-create-user-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = form.querySelector('button[type="submit"]');
+    const username = $('#admin-create-username').value.trim();
+    const password = $('#admin-create-password').value;
+    const email = $('#admin-create-email').value.trim();
+    button.disabled = true;
+    try {
+      const payload = { username, password };
+      if (email) payload.email = email;
+      await api('/api/admin/users', { method: 'POST', body: JSON.stringify(payload) });
+      form.reset();
+      $('#admin-user-search').value = username;
+      await loadUsers();
+      toast(`账号 ${username} 已创建，初始积分为 0`);
+    } catch (error) { toast(error.message, true); }
+    finally { button.disabled = false; }
+  });
   $('#close-user-records').addEventListener('click', () => $('#user-records-panel').classList.add('hidden'));
   $('#job-filter-form').addEventListener('submit', (event) => { event.preventDefault(); state.jobsPage = 1; loadJobs().catch((error) => toast(error.message, true)); });
   $('#job-filter-clear').addEventListener('click', () => { $('#job-user-filter').value = ''; $('#job-status-filter').value = ''; state.jobsPage = 1; loadJobs().catch((error) => toast(error.message, true)); });

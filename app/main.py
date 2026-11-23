@@ -46,9 +46,9 @@ MAX_REFERENCES = 8
 RESOLUTION_EDGES = {"1K": 1024, "2K": 2048, "3K": 3072, "4K": 3840}
 PASSWORD_ITERATIONS = 600_000
 IMAGE_MODELS = (
-    {"id": "gpt-image-2", "label": "GPT Image 2.5 · 标准", "credits_cost": 1, "price_rmb": "0.05"},
-    {"id": "gpt-image-2.5-flare", "label": "GPT Image 2.5 Flare", "credits_cost": 5, "price_rmb": "0.25"},
-    {"id": "gpt-image-2.5-sunburst", "label": "GPT Image 2.5 Sunburst", "credits_cost": 5, "price_rmb": "0.25"},
+    {"id": "gpt-image-2", "label": "GPT Image 2.5 · 标准", "credits_cost": 1, "price_rmb": "0.10"},
+    {"id": "gpt-image-2.5-flare", "label": "GPT Image 2.5 Flare", "credits_cost": 5, "price_rmb": "0.50"},
+    {"id": "gpt-image-2.5-sunburst", "label": "GPT Image 2.5 Sunburst", "credits_cost": 5, "price_rmb": "0.50"},
 )
 IMAGE_MODEL_BY_ID = {item["id"]: item for item in IMAGE_MODELS}
 PROMPT_TAGS = {
@@ -58,9 +58,9 @@ PROMPT_TAGS = {
     "commercial": ("香水广告", "珠宝特写", "咖啡包装", "甜品陈列", "家具大片", "运动鞋海报", "护肤品静物", "潮玩展示", "汽车宣传", "时尚杂志", "花艺品牌", "耳机产品", "手表广告", "书店橱窗", "茶饮海报", "酒店空间", "家居用品", "美妆主视觉", "礼盒设计", "建筑概念"),
     "science": ("纳米药物", "细胞成像", "蛋白结构", "宇宙星云", "气候地图", "植物解剖", "深海生态", "量子芯片", "人体骨骼", "太阳能电池", "脑神经网络", "材料晶格", "基因图谱", "显微世界", "火山剖面", "海洋洋流", "机械传动", "分子模型", "地质年代", "生物发光"),
 }
-PRICE = {"credits_per_image": 1, "rmb_per_image": "0.05", "rmb_per_credit": "0.05",
+PRICE = {"credits_per_image": 1, "rmb_per_image": "0.10", "rmb_per_credit": "0.10",
          "models": {item["id"]: {"credits_cost": item["credits_cost"], "price_rmb": item["price_rmb"]} for item in IMAGE_MODELS}}
-PAYMENT_TIERS = {1: 20, 5: 120, 10: 300}
+PAYMENT_TIERS = {1: 10, 5: 60, 10: 150}
 GALLERY_POSTS = json.loads((ROOT_DIR / "app/gallery_catalog.json").read_text(encoding="utf-8"))
 GALLERY_BY_ID = {post["id"]: post for post in GALLERY_POSTS}
 
@@ -165,6 +165,15 @@ class EmailCodeRequest(BaseModel):
 class EmailRegistrationRequest(EmailCodeRequest):
     password: str = Field(min_length=8, max_length=128)
     code: str = Field(pattern=r"^[0-9]{6}$")
+
+
+class AdminUserCreation(Credentials):
+    email: EmailStr | None = Field(default=None, max_length=254)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: EmailStr | None) -> str | None:
+        return str(value).lower() if value is not None else None
 
 
 class ImageGenerationRequest(BaseModel):
@@ -1173,7 +1182,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with database_connection(database_path) as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT * FROM payment_orders WHERE id = ?", (order_id,)).fetchone()
-            if not row or row["amount_cents"] != cents or row["credits"] != PAYMENT_TIERS.get(cents // 100):
+            if not row or row["amount_cents"] != cents:
                 raise HTTPException(400, "回调金额无效")
             if row["status"] == "paid":
                 if row["platform_trade_no"] != trade_no:
@@ -1207,6 +1216,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             rows = db.execute("SELECT * FROM users WHERE username LIKE ? OR email LIKE ? ORDER BY id DESC LIMIT 100", (f"%{q[:254]}%", f"%{q[:254]}%" )).fetchall()
             stats = db.execute("SELECT COUNT(*) AS users, COALESCE(SUM(credits), 0) AS credits FROM users").fetchone()
         return {"items": [public_user(row) for row in rows], "stats": dict(stats)}
+
+    @app.post("/api/admin/users", status_code=201)
+    def create_user(body: AdminUserCreation, user=Depends(admin_user)):
+        password_hash = hash_password(body.password)
+        username = body.username
+        email = body.email or username
+        with database_connection(database_path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT id FROM users WHERE username IN (?, ?) OR email IN (?, ?)",
+                          (username, email, username, email)).fetchone():
+                raise HTTPException(409, "账号或邮箱已存在")
+            cursor = db.execute("INSERT INTO users (username, email, password_hash, created_at) VALUES (?, ?, ?, ?)",
+                                (username, body.email, password_hash, now_iso()))
+            created = db.execute("SELECT * FROM users WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        return {"user": public_user(created)}
 
     @app.get("/api/admin/users/{user_id}/records")
     def user_records(user_id: int, user=Depends(admin_user)):

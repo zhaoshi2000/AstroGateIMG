@@ -5,7 +5,7 @@ import unittest
 
 from fastapi.testclient import TestClient
 
-from app.main import Settings, create_app, easy_pay_sign
+from app.main import Settings, create_app, database_connection, easy_pay_sign
 
 
 class PaymentTests(unittest.TestCase):
@@ -37,7 +37,7 @@ class PaymentTests(unittest.TestCase):
         return self.client.get("/api/payments/notify", params=fields)
 
     def test_tiers_and_signed_order_form(self):
-        for yuan, credits in ((1, 20), (5, 120), (10, 300)):
+        for yuan, credits in ((1, 10), (5, 60), (10, 150)):
             order = self.order(yuan)
             self.assertEqual(order["credits"], credits)
             self.assertEqual(order["amount_cents"], yuan * 100)
@@ -45,7 +45,11 @@ class PaymentTests(unittest.TestCase):
             self.assertEqual(order["fields"]["type"], "alipay")
             self.assertEqual(order["fields"]["sign"], easy_pay_sign(order["fields"], self.key))
         self.assertEqual(self.client.post("/api/payments/orders", json={"tier": 2}).status_code, 422)
-        self.assertEqual(self.client.get("/api/wallet").json()["credits"], 0)
+        wallet = self.client.get("/api/wallet").json()
+        self.assertEqual(wallet["credits"], 0)
+        self.assertEqual(wallet["pricing"]["rmb_per_credit"], "0.10")
+        self.assertEqual(wallet["pricing"]["models"]["gpt-image-2"]["price_rmb"], "0.10")
+        self.assertEqual(wallet["pricing"]["models"]["gpt-image-2.5-flare"]["price_rmb"], "0.50")
 
     def test_callback_credits_once_and_rejects_tampering(self):
         order = self.order(5)
@@ -59,7 +63,7 @@ class PaymentTests(unittest.TestCase):
         self.assertEqual(self.notify(order).status_code, 200)
         self.assertEqual(self.notify(order, trade_no="DIFFERENT").status_code, 400)
         wallet = self.client.get("/api/wallet").json()
-        self.assertEqual(wallet["credits"], 120)
+        self.assertEqual(wallet["credits"], 60)
         self.assertEqual(len([entry for entry in wallet["ledger"] if entry["kind"] == "payment"]), 1)
         self.assertEqual(self.client.get("/api/payments/orders/" + order["id"]).json()["status"], "paid")
 
@@ -68,7 +72,7 @@ class PaymentTests(unittest.TestCase):
         second = self.order(1)
         self.assertEqual(self.notify(first).status_code, 200)
         self.assertEqual(self.notify(second).status_code, 400)
-        self.assertEqual(self.client.get("/api/wallet").json()["credits"], 20)
+        self.assertEqual(self.client.get("/api/wallet").json()["credits"], 10)
         self.assertEqual(self.client.get("/api/payments/orders/" + second["id"]).json()["status"], "pending")
 
     def test_concurrent_notifications_credit_once(self):
@@ -76,8 +80,16 @@ class PaymentTests(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=2) as pool:
             responses = list(pool.map(lambda _: self.notify(order), range(2)))
         self.assertEqual([response.status_code for response in responses], [200, 200])
-        self.assertEqual(self.client.get("/api/wallet").json()["credits"], 300)
+        self.assertEqual(self.client.get("/api/wallet").json()["credits"], 150)
         self.assertEqual(len([row for row in self.client.get("/api/wallet").json()["ledger"] if row["kind"] == "payment"]), 1)
+
+    def test_earlier_order_keeps_credits_recorded_at_creation(self):
+        order = self.order(5)
+        with database_connection(Path(self.directory.name) / "astrogate.db") as db:
+            db.execute("UPDATE payment_orders SET credits = 120 WHERE id = ?", (order["id"],))
+        self.assertEqual(self.notify(order).status_code, 200)
+        self.assertEqual(self.client.get("/api/wallet").json()["credits"], 120)
+        self.assertEqual(self.client.get("/api/payments/orders/" + order["id"]).json()["credits"], 120)
 
 
 if __name__ == "__main__":

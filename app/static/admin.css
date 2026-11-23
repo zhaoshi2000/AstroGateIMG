@@ -13,3 +13,11 @@
 @media(max-width:1200px){.api-layout{grid-template-columns:1fr}.api-keys-panel{display:block}.api-guide-body{grid-template-columns:1fr}.api-results{grid-template-columns:1fr}}
 @media(max-width:620px){.api-intro{padding:21px;align-items:start;flex-direction:column;gap:17px}.api-intro h2{font-size:21px}.api-intro p{font-size:11px}.api-layout{gap:18px}.api-options{gap:12px}.api-batch-actions .button-row{width:auto}.api-batch-actions .primary{min-width:0}.api-key-create-row{flex-wrap:wrap}.api-key-create-row label{min-width:100px}.api-result{grid-template-columns:80px minmax(0,1fr)}.api-result-detail{padding:12px}.api-guide summary{padding:20px;font-size:13px}.api-guide summary span{display:block;margin:8px 0 0}.api-guide-body{padding:0 20px 20px}.api-guide pre{padding:12px;font-size:10px}.api-progress-heading{align-items:start}.api-output{margin-top:18px}.api-key-title{gap:6px}}
 @media(prefers-reduced-motion:reduce){.api-spinner{animation-duration:2s}}
+
+.create-user-panel{margin-bottom:24px}
+.create-user-form{display:grid;grid-template-columns:repeat(3,minmax(0,1fr)) auto;gap:12px;align-items:end}
+.create-user-form label{display:grid;gap:8px;min-width:0;font-size:11px;color:#6f7e96}
+.create-user-form input{width:100%;height:39px}
+.create-user-form button{height:39px}
+@media(max-width:1100px){.create-user-form{grid-template-columns:repeat(2,minmax(0,1fr))}.create-user-form button{justify-self:start}}
+@media(max-width:650px){.create-user-form{grid-template-columns:1fr}.create-user-form button{width:100%}}

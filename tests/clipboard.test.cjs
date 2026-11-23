@@ -199,9 +199,9 @@ async function main() {
   let tagCalls = 0;
   context.fetch = async (url, options = {}) => {
     if (url === '/api/images/models') return { ok: true, status: 200, json: async () => ({ items: [
-      { id: 'gpt-image-2', label: 'GPT Image 2.5 · 标准', available: true, credits_cost: 1, price_rmb: '0.05' },
-      { id: 'gpt-image-2.5-flare', label: 'GPT Image 2.5 Flare', available: true, credits_cost: 5, price_rmb: '0.25' },
-      { id: 'gpt-image-2.5-sunburst', label: 'GPT Image 2.5 Sunburst', available: false, credits_cost: 5, price_rmb: '0.25' },
+      { id: 'gpt-image-2', label: 'GPT Image 2.5 · 标准', available: true, credits_cost: 1, price_rmb: '0.10' },
+      { id: 'gpt-image-2.5-flare', label: 'GPT Image 2.5 Flare', available: true, credits_cost: 5, price_rmb: '0.50' },
+      { id: 'gpt-image-2.5-sunburst', label: 'GPT Image 2.5 Sunburst', available: false, credits_cost: 5, price_rmb: '0.50' },
     ] }) };
     if (url === '/api/prompts/assist') return { ok: true, status: 200, json: async () => ({ prompt: '月光下的古城，宽画幅，石墙与云海，柔和冷色调。' }) };
     if (url === '/api/prompts/tags') {

@@ -7,7 +7,7 @@ import unittest
 import httpx
 from fastapi.testclient import TestClient
 
-from app.main import Settings, create_app, database_connection, generation_failure_reason
+from app.main import Settings, create_app, database_connection, generation_failure_reason, verify_password
 from app.upstream_admin import project_accounts
 
 
@@ -66,6 +66,56 @@ class AdminTests(unittest.TestCase):
             self.assertEqual(client.get('/api/admin/upstream/accounts').status_code, 403)
             self.assertEqual(client.post('/api/admin/upstream/refresh', json={}).status_code, 403)
             self.assertEqual(len(self.calls), 0)
+
+    def test_admin_creates_password_account_without_exposing_password(self):
+        with TestClient(self.app()) as client:
+            payload = {'username': 'new.artist', 'password': 'strong-password-123', 'email': 'New.Artist@Example.com'}
+            self.assertEqual(client.post('/api/admin/users', json=payload).status_code, 401)
+            self.login(client)
+            response = client.post('/api/admin/users', json=payload)
+            self.assertEqual(response.status_code, 201, response.text)
+            created = response.json()['user']
+            self.assertEqual(created['username'], 'new.artist')
+            self.assertEqual(created['email'], 'new.artist@example.com')
+            self.assertEqual(created['credits'], 0)
+            self.assertFalse(created['is_admin'])
+            self.assertNotIn('password', response.text)
+            self.assertEqual(client.post('/api/admin/users', json=payload).status_code, 409)
+            self.assertEqual(client.post('/api/admin/users', json={
+                'username': 'new.artist@example.com', 'password': 'different-password'
+            }).status_code, 422)
+            self.assertEqual(client.post('/api/admin/users', json={
+                'username': 'another.artist', 'password': 'different-password', 'email': 'NEW.ARTIST@example.com'
+            }).status_code, 409)
+            self.assertEqual(client.post('/api/admin/users', json={
+                'username': 'bad name', 'password': 'short'
+            }).status_code, 422)
+            with database_connection(Path(self.directory.name) / 'astrogate.db') as db:
+                stored = db.execute('SELECT password_hash FROM users WHERE id = ?', (created['id'],)).fetchone()[0]
+            self.assertNotEqual(stored, payload['password'])
+            self.assertTrue(verify_password(payload['password'], stored))
+            client.post('/api/auth/logout')
+            login = client.post('/api/auth/login', json={
+                'identifier': 'new.artist@example.com', 'password': payload['password']
+            })
+            self.assertEqual(login.status_code, 200, login.text)
+            self.assertEqual(login.json()['user']['id'], created['id'])
+            self.assertEqual(client.post('/api/admin/users', json={
+                'username': 'other.user', 'password': 'different-password'
+            }).status_code, 403)
+
+    def test_admin_creates_username_only_account(self):
+        with TestClient(self.app()) as client:
+            self.login(client)
+            response = client.post('/api/admin/users', json={
+                'username': 'script.user', 'password': 'strong-password-123'
+            })
+            self.assertEqual(response.status_code, 201, response.text)
+            self.assertIsNone(response.json()['user']['email'])
+            client.post('/api/auth/logout')
+            self.assertEqual(client.post('/api/auth/login', json={
+                'identifier': 'script.user', 'password': 'strong-password-123'
+            }).status_code, 200)
 
     def test_quota_aggregation_deduplicates_and_never_returns_credentials(self):
         with TestClient(self.app()) as client:

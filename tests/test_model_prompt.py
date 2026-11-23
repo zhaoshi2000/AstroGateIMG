@@ -63,7 +63,7 @@ class ModelAndPromptTests(unittest.TestCase):
             self.assertEqual(models["gpt-image-2"]["credits_cost"], 1)
             self.assertFalse(models[IMAGE_25]["available"])
             self.assertEqual(models[IMAGE_25]["credits_cost"], 5)
-            self.assertEqual(models[IMAGE_25]["price_rmb"], "0.25")
+            self.assertEqual(models[IMAGE_25]["price_rmb"], "0.50")
             response = client.post("/api/images/generations", json={"prompt": "星空下的古城", "model": IMAGE_25})
             self.assertIn(response.status_code, (400, 503), response.text)
             self.assertEqual(client.get("/api/wallet").json()["credits"], 5)
