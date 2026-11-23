@@ -39,6 +39,7 @@ from app.admin_api import GenerationAdmission, create_admin_api_router, initiali
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 STATIC_DIR = ROOT_DIR / "app" / "static"
+IMAGE_UPSTREAM_TIMEOUT_SECONDS = 780
 SESSION_COOKIE = "astrogate_session"
 MAX_IMAGE_BYTES = 50 * 1024 * 1024
 MAX_OUTPUT_BYTES = 100 * 1024 * 1024
@@ -1394,7 +1395,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return {"item": previous, "credits": current_balance(user["id"])}
         output_path = None
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(240, connect=15), transport=config.upstream_transport, trust_env=False) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(IMAGE_UPSTREAM_TIMEOUT_SECONDS, connect=15), transport=config.upstream_transport, trust_env=False) as client:
                 result = await client.post(f"{config.upstream_url}/v1/images/{'edits' if references else 'generations'}", headers={"Authorization": f"Bearer {config.upstream_api_key}"}, json=payload)
                 if result.is_error:
                     try:
