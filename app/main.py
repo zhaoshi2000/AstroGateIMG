@@ -835,6 +835,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def studio():
         return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
 
+    @app.get("/chat")
+    def chat():
+        return FileResponse(STATIC_DIR / "chat.html", headers={"Cache-Control": "no-cache"})
+
     @app.get("/admin")
     @app.get("/admin/login")
     @app.get("/admin/accounts")
