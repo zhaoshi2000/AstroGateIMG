@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0a0d1b">
+  <title>对话创作 · AstroGate IMG</title>
+  <link rel="icon" href="/assets/mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/chat.css?v=1">
+</head>
+<body class="chat-page">
+  <div class="chat-shell">
+    <header class="chat-topbar">
+      <a class="chat-brand" href="/"><img src="/assets/mark.svg" alt=""><span>AstroGate <b>IMG</b></span></a>
+      <nav class="chat-topnav" aria-label="主导航"><a href="/studio">工作台</a><a class="active" href="/chat">对话创作</a><a href="/">探索作品</a></nav>
+      <div class="chat-account"><a class="credit-chip" href="/wallet"><span>◈</span><b id="chat-credits">0</b> 积分 <i>＋</i></a><span class="chat-avatar" id="chat-avatar">A</span><button id="chat-logout" class="quiet-button" type="button">退出</button></div>
+    </header>
+    <div class="chat-layout">
+      <aside class="conversation-sidebar" aria-label="创作会话">
+        <button id="new-chat" class="new-chat" type="button"><span>＋</span> 新建创作</button>
+        <div class="side-section"><p>本次对话</p><button id="current-thread" class="thread-item active" type="button"><span class="thread-mark">✦</span><span><b>新的创作想法</b><small>输入一句话开始</small></span></button></div>
+        <div class="side-section recent-section"><p>最近作品</p><div id="recent-images" class="recent-images"><span class="side-empty">正在读取作品库…</span></div></div>
+        <div class="side-footer"><a href="/studio">打开完整工作台 <span>↗</span></a><small>标准版 · 1 积分 / 张</small></div>
+      </aside>
+
+      <main class="chat-main">
+        <section class="chat-heading"><div><p class="chat-kicker">ASTROGATE / IMAGE CHAT</p><h1>像聊天一样，创作一张图</h1><p>描述画面，或粘贴多张参考图。每次生成会保存到你的作品库。</p></div><span class="model-badge" id="chat-model-label">GPT Image 2.5 · 标准</span></section>
+        <section id="chat-messages" class="chat-messages" aria-live="polite">
+          <article class="message assistant-message welcome-message">
+            <div class="message-avatar">✦</div><div class="message-body"><p class="message-name">AstroGate IMG</p><div class="message-bubble"><h2>今天想画什么？</h2><p>可以直接写一句话，也可以点击回形针上传参考图，或在输入框里按 <kbd>Ctrl</kbd> + <kbd>V</kbd> 粘贴图片。</p><div class="suggestion-grid"><button type="button" data-suggestion="雨夜的未来都市街道，霓虹灯映在潮湿地面，一位穿黑色风衣的年轻人回头望向镜头，紫蓝色光影，电影感构图。">雨夜未来都市</button><button type="button" data-suggestion="一只橘猫趴在阳光洒进来的书桌旁，桌面有翻开的书和一杯咖啡，温暖治愈，细腻插画。">阳光书桌与橘猫</button><button type="button" data-suggestion="透明香水瓶置于淡紫色石台，晨光穿过玻璃与花瓣，极简高级产品摄影，干净留白。">香水产品海报</button></div></div></div>
+          </article>
+        </section>
+        <div class="composer-zone" id="composer-zone">
+          <div id="attachment-strip" class="attachment-strip is-empty" aria-live="polite"></div>
+          <form id="chat-form" class="chat-composer">
+            <label class="attach-button" for="chat-files" title="添加图片或 Ctrl + V 粘贴"><span>＋</span><input id="chat-files" type="file" accept="image/png,image/jpeg,image/webp" multiple></label>
+            <label class="visually-hidden" for="chat-prompt">创作描述</label>
+            <textarea id="chat-prompt" rows="1" maxlength="4000" placeholder="描述你想创作的画面，或直接 Ctrl + V 粘贴参考图…" required></textarea>
+            <button id="chat-send" class="send-button" type="submit" aria-label="开始生成"><span>↑</span></button>
+          </form>
+          <div class="composer-meta"><span id="attachment-note">支持 PNG、JPG、WebP；最多 8 张参考图，Ctrl + V 可连续粘贴</span><span><kbd>Ctrl</kbd> + <kbd>Enter</kbd> 生成</span></div>
+          <details class="generation-options"><summary><span>生成设置</span><small id="generation-cost">1 积分 / 张 · ¥0.10</small></summary><div class="options-grid"><label>画面比例<select id="chat-size"><option value="1536x864" selected>16:9 · 宽屏</option><option value="1024x1024">1:1 · 方形</option><option value="1024x1536">2:3 · 竖图</option><option value="1536x1024">3:2 · 横图</option><option value="1280x960">4:3 · 标准</option><option value="960x1280">3:4 · 竖版</option><option value="864x1536">9:16 · 竖屏</option><option value="1792x768">21:9 · 超宽</option></select></label><label>图片质量<select id="chat-quality"><option value="low">快速</option><option value="medium" selected>标准</option><option value="high">高质量</option></select></label><label>导出画质<select id="chat-resolution"><option value="original" selected>原始</option><option value="1K">1K</option><option value="2K">2K</option><option value="3K">3K</option><option value="4K">4K</option></select></label></div></details>
+        </div>
+      </main>
+    </div>
+  </div>
+  <dialog id="image-dialog" class="image-dialog"><button id="image-dialog-close" type="button" aria-label="关闭图片预览">×</button><div id="image-dialog-canvas"><img id="image-dialog-image" alt="生成图片大图"></div><p>滚轮缩放，按住鼠标左键拖动查看细节</p></dialog>
+  <div id="chat-toast" class="chat-toast" role="status" aria-live="polite"></div>
+  <script src="/assets/chat.js?v=1" defer></script>
+</body>
+</html>
