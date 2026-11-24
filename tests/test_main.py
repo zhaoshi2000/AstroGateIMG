@@ -210,11 +210,13 @@ class AstroGateTests(unittest.TestCase):
                 self.login(client)
                 self.assertEqual(client.get('/api/wallet').json()['credits'], 1)
 
-    def test_homepage_and_studio_exist(self):
+    def test_homepage_studio_and_chat_exist(self):
         with TestClient(self.app()) as client:
             self.assertIn('0.10', client.get('/').text)
             self.assertIn('reference-image', client.get('/studio').text)
+            self.assertIn('Ctrl + V', client.get('/chat').text)
             self.assertEqual(client.get('/assets/mark.svg').status_code, 200)
+            self.assertEqual(client.get('/assets/chat.js').status_code, 200)
 
     def test_public_community_has_fifteen_complete_posts(self):
         with TestClient(self.app()) as client:
