@@ -180,7 +180,7 @@ async function loadImageModels() {
   renderImageModels();
 }
 $('#image-model').addEventListener('change', updateModelPrice);
-function authDestination() { const next = new URLSearchParams(location.search).get('next'); return /^\/\?(?:post=[a-z0-9-]+|mine=1|compose=1(?:&image=[0-9a-f]{24})?)$/.test(next || '') ? next : state.user?.is_admin ? '/admin' : '/studio'; }
+function authDestination() { const next = new URLSearchParams(location.search).get('next'); return (next === '/chat' || /^\/\?(?:post=[a-z0-9-]+|mine=1|compose=1(?:&image=[0-9a-f]{24})?)$/.test(next || '')) ? next : state.user?.is_admin ? '/admin' : '/studio'; }
 
 function authMode(mode) {
   state.mode = mode;
