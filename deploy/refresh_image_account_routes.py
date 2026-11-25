@@ -7,6 +7,7 @@ import ipaddress
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -26,6 +27,8 @@ PROBE_PORT = 18991
 PROBE_CONTROLLER = "127.0.0.1:19094"
 LOCAL_BACKUP = "LOCAL-RELAY"
 EXCLUDED = ("香港", "港", "hong kong", "[hk]", "hk-", "-hk", "剩余流量", "套餐到期", "防失联")
+ALLOWED_COUNTRIES = ("日本", "新加坡", "美国", "japan", "singapore", "united states", "tokyo", "osaka", "seattle", "los angeles")
+ALLOWED_COUNTRY_CODES = re.compile(r"(?<![a-z])(?:jp|sg|us)(?![a-z])")
 
 
 def ready_accounts(accounts):
@@ -46,7 +49,14 @@ def eligible_node(node):
     if not isinstance(node, dict):
         return False
     name = str(node.get("name") or "")
-    return bool(node.get("server") and name and not any(marker in name.lower() for marker in EXCLUDED))
+    lower_name = name.lower()
+    return bool(node.get("server") and name and (
+        name == LOCAL_BACKUP or (
+            not any(marker in lower_name for marker in EXCLUDED)
+            and (any(country in lower_name for country in ALLOWED_COUNTRIES)
+                 or ALLOWED_COUNTRY_CODES.search(lower_name))
+        )
+    ))
 
 
 def local_json(base, key, path, data=None):
@@ -74,16 +84,14 @@ def private_write(path, content):
         stream.write(content)
 
 
-def subscription_nodes(root, current):
+def subscription_nodes(root):
     nodes = {}
-    for node in current.get("proxies") or []:
-        if eligible_node(node):
-            nodes[node["name"]] = node
     backup = root / "proxy-runtime" / "local-backup.yaml"
     if backup.exists():
         for node in yaml.safe_load(backup.read_bytes()).get("proxies") or []:
             if eligible_node(node):
                 nodes[node["name"]] = node
+    subscription_loaded = False
     for path in sorted((root / "proxy-runtime" / "subscriptions").glob("*.txt")):
         address = path.read_text().strip()
         if not address:
@@ -94,12 +102,18 @@ def subscription_nodes(root, current):
                 opener = urllib.request.build_opener(urllib.request.ProxyHandler(proxy))
                 with opener.open(request, timeout=20) as response:
                     document = yaml.safe_load(response.read(2 * 1024 * 1024))
-                for node in document.get("proxies") or []:
+                proxies = document.get("proxies") if isinstance(document, dict) else None
+                if not isinstance(proxies, list):
+                    raise ValueError("Image proxy subscription is not a Clash node list")
+                subscription_loaded = True
+                for node in proxies:
                     if eligible_node(node):
                         nodes[node["name"]] = node
                 break
             except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError, AttributeError, yaml.YAMLError):
                 continue
+    if not subscription_loaded:
+        raise RuntimeError("No image proxy subscription could be loaded")
     return list(nodes.values())
 
 
@@ -222,7 +236,7 @@ def deploy(root, mihomo):
     path = root / "proxy-runtime" / "config.yaml"
     original = path.read_bytes()
     current = yaml.safe_load(original)
-    nodes = subscription_nodes(root, current)
+    nodes = subscription_nodes(root)
     hosts = resolved_hosts(nodes, current.get("hosts") or {})
     verified = rank_nodes(root, mihomo, nodes, hosts)
     verified_names = {name for _, name in verified}
@@ -295,3 +309,4 @@ if __name__ == "__main__":
     except Exception as error:
         print(json.dumps({"status": "failed", "reason": type(error).__name__}), file=sys.stderr)
         raise SystemExit(1) from None
+
