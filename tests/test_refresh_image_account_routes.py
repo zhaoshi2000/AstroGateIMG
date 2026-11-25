@@ -57,6 +57,13 @@ class ImageAccountRoutesTests(unittest.TestCase):
                 nodes = routes.subscription_nodes(root)
             self.assertEqual([node["name"] for node in nodes], ["日本01"])
 
+    def test_listener_retries_a_transient_proxy_reload(self):
+        with patch.object(routes, "backend_status", side_effect=["unreachable", "401"]) as status, \
+             patch.object(routes.time, "sleep") as sleep:
+            self.assertTrue(routes.listener_ready(routes.FIRST_PORT))
+        self.assertEqual(status.call_count, 2)
+        sleep.assert_called_once_with(2)
+
     def test_each_exit_has_automatic_fallback(self):
         verified = [(100 + index, f"node-{index}") for index in range(5)]
         nodes = [{"name": name, "server": "example.com"} for _, name in verified]
