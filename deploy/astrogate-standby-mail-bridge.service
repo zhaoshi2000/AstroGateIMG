@@ -1,0 +1,14 @@
+[Unit]
+Description=AstroGate IMG standby mail bridge through the primary
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ssh -N -T -i /root/.ssh/astrogate_img_mail_relay -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -L 127.0.0.1:10025:127.0.0.1:10025 root@154.94.226.49
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
