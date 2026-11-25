@@ -150,6 +150,15 @@ def backend_status(port):
     return result.stdout.strip() if result.returncode == 0 else "unreachable"
 
 
+def listener_ready(port, attempts=3):
+    for attempt in range(attempts):
+        if backend_status(port) == "401":
+            return True
+        if attempt + 1 < attempts:
+            time.sleep(2)
+    return False
+
+
 def rank_nodes(root, mihomo, nodes, hosts):
     with tempfile.TemporaryDirectory(prefix="image-route-probe-", dir=root / "proxy-runtime") as directory:
         folder = Path(directory)
@@ -277,7 +286,7 @@ def deploy(root, mihomo):
     try:
         controller_request(controller, secret, "/configs", {"path": str(candidate)})
         for index in (0, group_count - 1):
-            if backend_status(FIRST_PORT + index) != "401":
+            if not listener_ready(FIRST_PORT + index):
                 raise RuntimeError("Proxy listener did not pass the ChatGPT route check")
         for account, proxy in assigned:
             if account.get("proxy") == proxy:
