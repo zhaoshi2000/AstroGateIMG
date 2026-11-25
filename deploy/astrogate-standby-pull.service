@@ -1,0 +1,8 @@
+[Unit]
+Description=Pull verified AstroGate IMG snapshots from the primary
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/astrogate-img/deploy/pull_standby_snapshot.py

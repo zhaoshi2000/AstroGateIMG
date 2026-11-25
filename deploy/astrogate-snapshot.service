@@ -1,0 +1,7 @@
+[Unit]
+Description=Create consistent AstroGate IMG standby snapshots
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/astrogate-img/deploy/create_standby_snapshot.py

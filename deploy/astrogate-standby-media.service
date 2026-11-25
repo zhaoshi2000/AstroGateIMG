@@ -1,0 +1,8 @@
+[Unit]
+Description=Pull AstroGate IMG history images from the primary
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/astrogate-img/deploy/pull_standby_media.py --workers 4
