@@ -1,7 +1,12 @@
 import importlib.util
+import io
+import tempfile
 import unittest
 from collections import Counter
 from pathlib import Path
+from unittest.mock import patch
+
+import yaml
 
 
 path = Path(__file__).resolve().parents[1] / "deploy" / "refresh_image_account_routes.py"
@@ -28,7 +33,29 @@ class ImageAccountRoutesTests(unittest.TestCase):
         self.assertFalse(routes.eligible_node({"name": "香港01", "server": "example.com"}))
         self.assertFalse(routes.eligible_node({"name": "Hong Kong 02", "server": "example.com"}))
         self.assertFalse(routes.eligible_node({"name": "剩余流量：100 GB", "server": "example.com"}))
+        self.assertFalse(routes.eligible_node({"name": "俄罗斯01", "server": "example.com"}))
+        self.assertFalse(routes.eligible_node({"name": "韩国01", "server": "example.com"}))
+        self.assertFalse(routes.eligible_node({"name": "台湾01", "server": "example.com"}))
         self.assertTrue(routes.eligible_node({"name": "日本01", "server": "example.com"}))
+        self.assertTrue(routes.eligible_node({"name": "新加坡01", "server": "example.com"}))
+        self.assertTrue(routes.eligible_node({"name": "美国01", "server": "example.com"}))
+        self.assertTrue(routes.eligible_node({"name": "[US]-149.52.39.178", "server": "example.com"}))
+        self.assertTrue(routes.eligible_node({"name": routes.LOCAL_BACKUP, "server": "127.0.0.1"}))
+
+    def test_subscription_uses_only_current_source_and_approved_regions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subscriptions = root / "proxy-runtime" / "subscriptions"
+            subscriptions.mkdir(parents=True)
+            (subscriptions / "current.txt").write_text("https://example.test/subscription")
+            response = yaml.safe_dump({"proxies": [
+                {"name": "日本01", "server": "new-japan.example"},
+                {"name": "香港01", "server": "new-hong-kong.example"},
+            ]}, allow_unicode=True).encode()
+            with patch.object(routes.urllib.request, "build_opener") as build_opener:
+                build_opener.return_value.open.return_value = io.BytesIO(response)
+                nodes = routes.subscription_nodes(root)
+            self.assertEqual([node["name"] for node in nodes], ["日本01"])
 
     def test_each_exit_has_automatic_fallback(self):
         verified = [(100 + index, f"node-{index}") for index in range(5)]
@@ -69,3 +96,4 @@ class ImageAccountRoutesTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
