@@ -436,9 +436,11 @@ def initialize_database(path: Path, settings: Settings) -> None:
         # One application worker owns jobs. Refund reservations interrupted by a restart.
         for job in db.execute("SELECT id, user_id, credits_cost FROM generation_jobs WHERE status = 'pending'").fetchall():
             cost = job["credits_cost"]
-            db.execute("UPDATE users SET credits = credits + ? WHERE id = ?", (cost, job["user_id"]))
-            ledger_entry(db, job["user_id"], cost, "refund", "服务重启，积分已退回", f"refund:{job['id']}")
-            db.execute("UPDATE generation_jobs SET status = 'failed', error_message = '服务重启，积分已退回' WHERE id = ?", (job["id"],))
+            if cost:
+                db.execute("UPDATE users SET credits = credits + ? WHERE id = ?", (cost, job["user_id"]))
+                ledger_entry(db, job["user_id"], cost, "refund", "服务重启，积分已退回", f"refund:{job['id']}")
+            message = "服务重启，积分已退回" if cost else "服务重启，生成中断"
+            db.execute("UPDATE generation_jobs SET status = 'failed', error_message = ? WHERE id = ?", (message, job["id"]))
 
 
 def public_user(row) -> dict[str, Any]:
@@ -1357,11 +1359,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(409, "该请求已提交，请查看图集或重新发起生成")
             if not available:
                 raise HTTPException(503, "当前图片节点尚未开放该模型，请选择其他模型")
-            if not db.execute("UPDATE users SET credits = credits - ? WHERE id = ? AND credits >= ?", (credits_cost, user_id, credits_cost)).rowcount:
-                raise HTTPException(402, f"积分不足，请先兑换充值；当前模型每张图片需要 {credits_cost} 积分")
             job_id = secrets.token_hex(12)
+            if credits_cost:
+                if not db.execute("UPDATE users SET credits = credits - ? WHERE id = ? AND credits >= ?", (credits_cost, user_id, credits_cost)).rowcount:
+                    raise HTTPException(402, f"积分不足，请先兑换充值；当前模型每张图片需要 {credits_cost} 积分")
+                ledger_entry(db, user_id, -credits_cost, "generation", f"生成图片 · {model} · 1 张", f"generation:{job_id}")
             db.execute("INSERT INTO generation_jobs (id, user_id, request_key, fingerprint, status, created_at, credits_cost, prompt) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)", (job_id, user_id, key, fingerprint, now_iso(), credits_cost, prompt))
-            ledger_entry(db, user_id, -credits_cost, "generation", f"生成图片 · {model} · 1 张", f"generation:{job_id}")
             return job_id, None
 
     def refund(job_id: str, message: str):
@@ -1369,16 +1372,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             db.execute("BEGIN IMMEDIATE")
             job = db.execute("SELECT user_id, status, credits_cost FROM generation_jobs WHERE id = ?", (job_id,)).fetchone()
             if job and job["status"] == "pending":
-                db.execute("UPDATE users SET credits = credits + ? WHERE id = ?", (job["credits_cost"], job["user_id"]))
-                ledger_entry(db, job["user_id"], job["credits_cost"], "refund", "生成失败，积分已退回", f"refund:{job_id}")
+                if job["credits_cost"]:
+                    db.execute("UPDATE users SET credits = credits + ? WHERE id = ?", (job["credits_cost"], job["user_id"]))
+                    ledger_entry(db, job["user_id"], job["credits_cost"], "refund", "生成失败，积分已退回", f"refund:{job_id}")
                 db.execute("UPDATE generation_jobs SET status = 'failed', error_message = ? WHERE id = ?", (message[:500], job_id))
 
-    async def run_generation(body, references, user, request_key):
+    async def run_generation(body, references, user, request_key, *, credit_exempt=False):
         if not config.upstream_url or not config.upstream_api_key:
             raise HTTPException(503, "图片服务暂未配置")
         models = {item["id"]: item for item in await image_model_items()}
         selected_model = models[body.model]
-        credits_cost = selected_model["credits_cost"]
+        credits_cost = 0 if credit_exempt else selected_model["credits_cost"]
         if len(references) > MAX_REFERENCES:
             raise HTTPException(400, "最多可使用 8 张参考图")
         decoded = await run_in_threadpool(lambda: [decode_reference(value) for value in references]) if references else []
@@ -1445,7 +1449,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if isinstance(exc, HTTPException):
                 raise
             if isinstance(exc, (httpx.HTTPError, ValueError, binascii.Error)):
-                raise HTTPException(502, "图片生成未完成，积分已退回，请稍后再试") from exc
+                message = "图片生成未完成，积分已退回，请稍后再试" if credits_cost else "图片生成未完成，请稍后再试"
+                raise HTTPException(502, message) from exc
             raise
 
     def current_balance(user_id):

@@ -9,6 +9,8 @@ API 基址为 `https://82.157.64.38:18448/v1`。在 [API 管理页](https://82.1
 | POST | `/images/edits` | 根据提示词和参考图生成一张图 |
 | GET | `/images/files/{item_id}` | 用同一管理员的密钥下载图片 |
 
+用当前密钥查询 `/models` 时，`credits_cost` 是这把密钥每张图实际消耗的积分。免积分密钥的单价为 0，账号余额为 0 时也可以出图。生成结果中的 `credits` 是账号当前余额。
+
 ## 用 PowerShell 生成并下载
 
 把图片 API 密钥放入当前进程的环境变量 `ASTROGATE_IMG_KEY`。下面示例用同一把密钥生成和下载，在当前目录保存结果。

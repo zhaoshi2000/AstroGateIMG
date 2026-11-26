@@ -116,6 +116,37 @@ class AdminApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.client.post('/v1/images/generations', headers=headers, json={'prompt': 'different'})).status_code, 409)
         self.assertEqual((await self.client.post('/v1/images/generations', headers=headers, json={'prompt': 'moon', 'n': 2})).status_code, 422)
 
+    async def test_credit_exemption_is_scoped_to_the_key_and_skips_wallet_entries(self):
+        free, paid = await self.key(), await self.key()
+        free_headers = {'Authorization': 'Bearer ' + free['key']}
+        paid_headers = {'Authorization': 'Bearer ' + paid['key']}
+        with database_connection(self.path) as db:
+            db.execute('UPDATE users SET credits = 0 WHERE id = ?', (self.admin_id,))
+            db.execute('UPDATE admin_api_keys SET credit_exempt = 1 WHERE id = ?', (free['item']['id'],))
+        for headers, expected in ((free_headers, 0), (paid_headers, 1)):
+            models = (await self.client.get('/v1/models', headers=headers)).json()['data']
+            self.assertEqual(next(m['credits_cost'] for m in models if m['id'] == 'gpt-image-2'), expected)
+        prompt = {'prompt': 'a green paper boat'}
+        forged = {**prompt, 'credit_exempt': True}
+        for path, headers in (('/v1/images/generations', paid_headers), ('/api/admin/images/generations', {})):
+            denied = await self.client.post(path, headers=headers, json=forged)
+            self.assertEqual(denied.status_code, 402, denied.text)
+        for path, body in (('generations', prompt), ('edits', {**prompt, 'image_data_urls': ['data:image/png;base64,' + PNG]})):
+            headers = {**free_headers, 'Idempotency-Key': path}
+            result = await self.client.post('/v1/images/' + path, headers=headers, json=body)
+            self.assertEqual(result.status_code, 200, result.text)
+            self.assertEqual((result.json()['credits_cost'], result.json()['credits']), (0, 0))
+            replay = await self.client.post('/v1/images/' + path, headers=headers, json=body)
+            self.assertEqual(replay.json()['id'], result.json()['id'])
+        self.failing = True
+        failed = await self.client.post('/v1/images/generations', headers=free_headers, json=prompt)
+        self.assertEqual(failed.status_code, 502)
+        self.assertEqual(self.counts(), (0, 3))
+        self.assertEqual(len(self.calls), 3)
+        with database_connection(self.path) as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM credit_ledger WHERE kind IN (\'generation\',\'refund\')').fetchone()[0], 0)
+            self.assertEqual([r[0] for r in db.execute('SELECT credits_cost FROM image_history')], [0, 0])
+
     async def test_parallel_key_limit_rejects_before_charge_and_releases_after_failure(self):
         created = await self.key(2)
         headers = {'Authorization': 'Bearer ' + created['key']}

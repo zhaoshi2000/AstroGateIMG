@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field, field_validator
 
 
 MAX_ADMIN_CONCURRENCY = 8
-KEY_COLUMNS = 'id, name, prefix, max_concurrency, created_at, last_used_at, revoked_at'
+KEY_COLUMNS = 'id, name, prefix, max_concurrency, credit_exempt, created_at, last_used_at, revoked_at'
 
 
 class KeyCreation(BaseModel):
@@ -46,6 +46,9 @@ def initialize_admin_api_database(path, database_connection):
             );
             CREATE INDEX IF NOT EXISTS admin_api_keys_by_user ON admin_api_keys(user_id, created_at DESC);
         ''')
+        columns = {row['name'] for row in db.execute('PRAGMA table_info(admin_api_keys)')}
+        if 'credit_exempt' not in columns:
+            db.execute('ALTER TABLE admin_api_keys ADD COLUMN credit_exempt INTEGER NOT NULL DEFAULT 0 CHECK(credit_exempt IN (0,1))')
 
 
 class GenerationAdmission:
@@ -115,7 +118,7 @@ def create_admin_api_router(*, database_path, image_dir, database_connection, ha
     def create_key(body: KeyCreation, user=Depends(admin_user)):
         token = 'agimg_' + secrets.token_urlsafe(32)
         item = {'id': secrets.token_hex(12), 'name': body.name, 'prefix': token[:13],
-                'max_concurrency': body.max_concurrency, 'created_at': now_iso(),
+                'max_concurrency': body.max_concurrency, 'credit_exempt': 0, 'created_at': now_iso(),
                 'last_used_at': None, 'revoked_at': None}
         with database_connection(database_path) as db:
             db.execute('BEGIN IMMEDIATE')
@@ -134,7 +137,8 @@ def create_admin_api_router(*, database_path, image_dir, database_connection, ha
 
     @router.get('/v1/models')
     async def models(principal=Depends(api_principal)):
-        return {'object': 'list', 'data': [{'object': 'model', **item} for item in await image_model_items()]}
+        pricing = {'credits_cost': 0, 'price_rmb': '0.00'} if principal['key']['credit_exempt'] else {}
+        return {'object': 'list', 'data': [{'object': 'model', **item, **pricing} for item in await image_model_items()]}
 
     def owned_image(item_id, user_id):
         if not re.fullmatch(r'[0-9a-f]{24}', item_id):
@@ -164,7 +168,7 @@ def create_admin_api_router(*, database_path, image_dir, database_connection, ha
     async def api_generate(body, images, principal, request, request_key):
         user = principal['user']
         with admission.slot(user['id'], principal['key']):
-            result = await run_generation(body, images, user, request_key)
+            result = await run_generation(body, images, user, request_key, credit_exempt=bool(principal['key']['credit_exempt']))
             item = result['item']
             if body.response_format == 'url':
                 data = {'url': str(request.url_for('admin_api_image_file', item_id=item['id']))}
