@@ -86,6 +86,7 @@ def activate(root: Path = ROOT, force: bool = False) -> Path:
     subprocess.run([*compose, 'stop', 'client', 'upstream'], cwd=root, check=True)
     backup = save_and_apply(root, manifest)
     subprocess.run([*compose, 'up', '-d', '--no-build'], cwd=root, check=True)
+    subprocess.run(['systemctl', 'start', 'astrogate-standby-pull.timer'], check=True)
     return backup
 
 

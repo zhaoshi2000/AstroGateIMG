@@ -5,4 +5,6 @@ After=network-online.target
 
 [Service]
 Type=oneshot
+EnvironmentFile=/opt/astrogate-img/.env
 ExecStart=/usr/bin/python3 /opt/astrogate-img/deploy/pull_standby_snapshot.py
+ExecStartPost=/usr/bin/python3 /opt/astrogate-img/deploy/sync_standby_accounts.py
