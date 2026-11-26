@@ -5,4 +5,4 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python3 /opt/astrogate-img/deploy/pull_standby_media.py --workers 4
+ExecStart=/usr/bin/flock /run/lock/astrogate-img-media.lock /usr/bin/python3 /opt/astrogate-img/deploy/pull_standby_media.py --workers 4

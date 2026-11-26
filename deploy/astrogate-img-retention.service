@@ -1,0 +1,8 @@
+[Unit]
+Description=Expire old AstroGate IMG generated images and private gallery entries
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/flock /run/lock/astrogate-img-media.lock /usr/bin/python3 /opt/astrogate-img/deploy/prune_generated_images.py --apply
+Restart=on-failure
+RestartSec=10min

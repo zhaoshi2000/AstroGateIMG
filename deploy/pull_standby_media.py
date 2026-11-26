@@ -6,6 +6,8 @@ are transferred separately and only applied during a planned failover.
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -22,7 +24,7 @@ def _rsync(*args: str, timeout: int = 21600) -> str:
         ['rsync', '-e',
          f'ssh -i {KEY} -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=12',
          *args],
-        capture_output=True, text=True, timeout=timeout,
+        capture_output=True, text=True, timeout=timeout, env={**os.environ, 'TZ': 'UTC', 'LC_ALL': 'C'},
     )
     if result.returncode:
         raise RuntimeError(f'rsync exit {result.returncode}: {result.stderr[-300:]}')
@@ -31,10 +33,16 @@ def _rsync(*args: str, timeout: int = 21600) -> str:
 
 def _remote_files(directory: str) -> list[tuple[int, str]]:
     listing = _rsync('-r', '--list-only', SOURCE + directory + '/', timeout=60)
+    marker = ROOT / 'generated-images-retention-cutoff'
+    cutoff = int(marker.read_text()) if marker.exists() else 0
     files = []
     for line in listing.splitlines():
         fields = line.split(maxsplit=4)
         if len(fields) == 5 and fields[0].startswith('-'):
+            if cutoff:
+                modified = datetime.strptime(' '.join(fields[2:4]), '%Y/%m/%d %H:%M:%S')
+                if modified.replace(tzinfo=timezone.utc).timestamp() < cutoff:
+                    continue
             files.append((int(fields[1].replace(',', '')), fields[4]))
     return files
 
